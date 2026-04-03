@@ -15,7 +15,6 @@ import type {
   Property, Unit, Tenant, RentPayment, Booking,
   Expense, ElectricMeter, MeterReading, Transfer, AppUser
 } from '../types';
-import type { AppUser } from '../types';
 
 // ─── مساعد: تحويل Timestamp → Date ───────────────────────────────────────────
 export const tsToDate = (ts: Timestamp): Date => ts?.toDate?.() ?? new Date();
