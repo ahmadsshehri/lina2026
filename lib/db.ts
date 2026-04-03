@@ -15,6 +15,7 @@ import type {
   Property, Unit, Tenant, RentPayment, Booking,
   Expense, ElectricMeter, MeterReading, Transfer, AppUser
 } from '../types';
+import type { AppUser } from '../types';
 
 // ─── مساعد: تحويل Timestamp → Date ───────────────────────────────────────────
 export const tsToDate = (ts: Timestamp): Date => ts?.toDate?.() ?? new Date();
@@ -368,7 +369,10 @@ export async function getAllUsers(propertyId?: string): Promise<AppUser[]> {
     q = query(collection(db, 'users'));
   }
   const snap = await getDocs(q);
-  return snap.docs.map(d => ({ uid: d.id, ...d.data() } as AppUser));
+  return snap.docs.map((d) => {
+  const data = d.data() as Omit<AppUser, 'uid'>;
+  return { uid: d.id, ...data };
+});
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
