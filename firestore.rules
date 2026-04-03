@@ -1,0 +1,112 @@
+// firestore.rules
+// ─────────────────────────────────────────────────────────────────────────────
+// قواعد أمان Firestore — RBAC كامل
+// ─────────────────────────────────────────────────────────────────────────────
+
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ─── دوال مساعدة ───────────────────────────────────────────────────────
+    function isAuth() {
+      return request.auth != null;
+    }
+
+    function userDoc() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function role() {
+      return userDoc().role;
+    }
+
+    function isOwner()       { return isAuth() && role() == 'owner'; }
+    function isManager()     { return isAuth() && role() == 'manager'; }
+    function isAccountant()  { return isAuth() && role() == 'accountant'; }
+    function isMaintenance() { return isAuth() && role() == 'maintenance'; }
+
+    function canAccessProperty(propId) {
+      return isOwner() ||
+        (isAuth() && propId in userDoc().propertyIds);
+    }
+
+    // ─── المستخدمون ─────────────────────────────────────────────────────────
+    match /users/{userId} {
+      allow read:   if isAuth() && (request.auth.uid == userId || isOwner());
+      allow create: if isOwner();
+      allow update: if isOwner() || request.auth.uid == userId;
+      allow delete: if isOwner();
+    }
+
+    // ─── العقارات ────────────────────────────────────────────────────────────
+    match /properties/{propId} {
+      allow read:   if isAuth() && canAccessProperty(propId);
+      allow create: if isOwner();
+      allow update: if isOwner();
+      allow delete: if isOwner();
+    }
+
+    // ─── الوحدات ─────────────────────────────────────────────────────────────
+    match /units/{unitId} {
+      allow read:   if isAuth() && canAccessProperty(resource.data.propertyId);
+      allow write:  if isAuth() && canAccessProperty(resource.data.propertyId)
+                       && (isOwner() || isManager());
+    }
+
+    // ─── المستأجرون ──────────────────────────────────────────────────────────
+    match /tenants/{tenantId} {
+      allow read:   if isAuth() && canAccessProperty(resource.data.propertyId)
+                       && !isMaintenance();
+      allow create: if isAuth() && (isOwner() || isManager());
+      allow update: if isAuth() && (isOwner() || isManager() || isAccountant());
+      allow delete: if isOwner();
+    }
+
+    // ─── دفعات الإيجار ───────────────────────────────────────────────────────
+    match /rentPayments/{paymentId} {
+      allow read:   if isAuth() && canAccessProperty(resource.data.propertyId)
+                       && !isMaintenance();
+      allow create: if isAuth() && (isOwner() || isManager() || isAccountant());
+      allow update: if isOwner();   // التعديل للمالك فقط
+      allow delete: if isOwner();
+    }
+
+    // ─── الحجوزات المفروشة ────────────────────────────────────────────────────
+    match /bookings/{bookingId} {
+      allow read:   if isAuth() && canAccessProperty(resource.data.propertyId)
+                       && !isMaintenance();
+      allow create: if isAuth() && (isOwner() || isManager());
+      allow update: if isAuth() && (isOwner() || isManager());
+      allow delete: if isOwner();
+    }
+
+    // ─── المصاريف ────────────────────────────────────────────────────────────
+    match /expenses/{expenseId} {
+      allow read:   if isAuth() && canAccessProperty(resource.data.propertyId)
+                       && !isMaintenance();
+      allow create: if isAuth() && (isOwner() || isManager() || isAccountant());
+      allow update: if isOwner();
+      allow delete: if isOwner();
+    }
+
+    // ─── عدادات الكهرباء ─────────────────────────────────────────────────────
+    match /electricMeters/{meterId} {
+      allow read:   if isAuth() && canAccessProperty(resource.data.propertyId);
+      allow write:  if isAuth() && (isOwner() || isManager());
+    }
+
+    match /meterReadings/{readingId} {
+      allow read:   if isAuth() && canAccessProperty(resource.data.propertyId);
+      allow write:  if isAuth() && (isOwner() || isManager());
+    }
+
+    // ─── التحويلات المالية ────────────────────────────────────────────────────
+    match /transfers/{transferId} {
+      allow read:   if isAuth() && canAccessProperty(resource.data.propertyId)
+                       && (isOwner() || isManager() || isAccountant());
+      allow create: if isAuth() && (isOwner() || isManager());
+      allow update: if isOwner();
+      allow delete: if isOwner();
+    }
+  }
+}
