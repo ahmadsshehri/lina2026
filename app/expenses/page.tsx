@@ -2,7 +2,7 @@
 import { useEffect, useState } from 'react';
 import { onAuthStateChanged } from 'firebase/auth';
 import { auth, db } from '../../lib/firebase';
-import { collection, getDocs, addDoc, deleteDoc, doc, query, where, serverTimestamp, Timestamp } from 'firebase/firestore';
+import { collection, getDocs, addDoc, deleteDoc, doc, query, where, serverTimestamp, Timestamp, getDoc } from 'firebase/firestore';
 import { useRouter } from 'next/navigation';
 
 interface Property { id: string; name: string; }
