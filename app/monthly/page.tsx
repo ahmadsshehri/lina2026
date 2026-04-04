@@ -1,519 +1,313 @@
-// app/monthly/page.tsx — إدارة الإيجار الشهري
 'use client';
 import { useEffect, useState } from 'react';
-import { useForm } from 'react-hook-form';
-import { useStore } from '../../store/useStore';
-import {
-  getTenants, createTenant, updateTenant, terminateTenant,
-  createPayment, getTenantPayments, getPayments,
-} from '../../lib/db';
-import { Timestamp } from 'firebase/firestore';
-import { useAuth } from '../../context/AuthContext';
-import toast from 'react-hot-toast';
-import { exportPaymentsPDF, exportArrearsPDF } from '../../lib/export';
-import type { Tenant, RentPayment } from '../../types';
+import { onAuthStateChanged } from 'firebase/auth';
+import { auth, db } from '../../lib/firebase';
+import { collection, getDocs, addDoc, updateDoc, doc, query, where, orderBy, serverTimestamp, Timestamp } from 'firebase/firestore';
+import { useRouter } from 'next/navigation';
 
-type Tab = 'tenants' | 'payments' | 'arrears';
-
-const paymentCycleLabel: Record<string, string> = {
-  monthly: 'شهري', quarterly: 'ربع سنوي', semi: 'نصف سنوي', annual: 'سنوي',
-};
-const methodLabel: Record<string, string> = {
-  transfer: 'تحويل', cash: 'كاش', ejar: 'إيجار', stc_pay: 'STC Pay',
-};
-
-export default function MonthlyPage() {
-  const { activeProperty, activeMonth, setActivePage } = useStore();
-  const { appUser } = useAuth();
-  const [tab,      setTab]      = useState<Tab>('tenants');
-  const [tenants,  setTenants]  = useState<Tenant[]>([]);
-  const [payments, setPayments] = useState<RentPayment[]>([]);
-  const [loading,  setLoading]  = useState(true);
-  const [showTenantModal, setShowTenantModal] = useState(false);
-  const [showPayModal,    setShowPayModal]    = useState<Tenant | null>(null);
-  const [editTenant,      setEditTenant]      = useState<Tenant | null>(null);
-
-  const load = async () => {
-    if (!activeProperty) return;
-    setLoading(true);
-    const [t, p] = await Promise.all([
-      getTenants(activeProperty.id),
-      getPayments(activeProperty.id),
-    ]);
-    setTenants(t);
-    setPayments(p);
-    setLoading(false);
-  };
-
-  useEffect(() => { setActivePage('monthly'); load(); }, [activeProperty]);
-
-  // حساب المتأخرين
-  const today = new Date();
-  const arrears = tenants.filter(t => {
-    if (t.status !== 'active') return false;
-    const tenantPayments = payments.filter(p => p.tenantId === t.id);
-    const totalBalance = tenantPayments.reduce((s, p) => s + (p.balance || 0), 0);
-    return totalBalance > 0;
-  });
-
-  const totalArrears = arrears.reduce((s, t) => {
-    const bal = payments.filter(p => p.tenantId === t.id).reduce((x, p) => x + (p.balance || 0), 0);
-    return s + bal;
-  }, 0);
-
-  if (!activeProperty) return <NoProperty />;
-
-  return (
-    <div className="p-5" dir="rtl">
-      <div className="flex items-center justify-between mb-5">
-        <div>
-          <h1 className="text-lg font-medium text-gray-800">الإيجار الشهري</h1>
-          <p className="text-sm text-gray-400">{tenants.filter(t => t.status === 'active').length} مستأجر نشط</p>
-        </div>
-        <div className="flex gap-2">
-          <button
-            onClick={() => exportPaymentsPDF(payments.filter(p => {
-              const [y,m] = activeMonth.split('-').map(Number);
-              const d = p.paidDate ? (p.paidDate as Timestamp).toDate() : null;
-              return d?.getMonth() === m-1 && d?.getFullYear() === y;
-            }), activeProperty.name, activeMonth)}
-            className="text-xs border border-gray-200 rounded-lg px-3 py-1.5 hover:bg-gray-50"
-          >
-            ⬇ PDF
-          </button>
-          <button
-            onClick={() => { setEditTenant(null); setShowTenantModal(true); }}
-            className="bg-[#1B4F72] text-white text-sm rounded-lg px-4 py-1.5 hover:bg-[#2E86C1] transition-colors"
-          >
-            + مستأجر جديد
-          </button>
-        </div>
-      </div>
-
-      {/* Tabs */}
-      <div className="flex border-b border-gray-200 mb-4 gap-1">
-        {[
-          { id: 'tenants', label: 'المستأجرون والعقود' },
-          { id: 'payments', label: 'سجل الدفعات' },
-          { id: 'arrears', label: `المتأخرات ${arrears.length > 0 ? `(${arrears.length})` : ''}` },
-        ].map(t => (
-          <button
-            key={t.id}
-            onClick={() => setTab(t.id as Tab)}
-            className={`px-4 py-2 text-sm transition-all border-b-2 -mb-px
-              ${tab === t.id
-                ? 'text-[#1B4F72] border-[#1B4F72] font-medium'
-                : 'text-gray-400 border-transparent hover:text-gray-600'}`}
-          >
-            {t.label}
-          </button>
-        ))}
-      </div>
-
-      {loading ? <PageLoader /> : (
-        <>
-          {/* ─── Tenants Tab ─── */}
-          {tab === 'tenants' && (
-            <div className="bg-white rounded-xl border border-gray-100 overflow-hidden">
-              <table className="w-full text-sm">
-                <thead className="bg-gray-50">
-                  <tr>
-                    {['ش','المستأجر','الجوال','رقم العقد','بداية العقد','نهاية العقد','دورة الدفع','الإيجار','الحالة',''].map(h => (
-                      <th key={h} className="px-3 py-2.5 text-right text-xs text-gray-500 font-medium whitespace-nowrap">{h}</th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {tenants.map(t => (
-                    <tr key={t.id} className="border-t border-gray-50 hover:bg-gray-50/50">
-                      <td className="px-3 py-2.5 font-medium text-[#1B4F72]">{t.unitNumber}</td>
-                      <td className="px-3 py-2.5 font-medium">{t.name}</td>
-                      <td className="px-3 py-2.5 text-gray-500 text-xs dir-ltr text-left">{t.phone}</td>
-                      <td className="px-3 py-2.5 text-gray-400 text-xs">{t.contractNumber}</td>
-                      <td className="px-3 py-2.5 text-xs text-gray-500">{fmtTs(t.contractStart)}</td>
-                      <td className="px-3 py-2.5 text-xs">
-                        <span className={isExpiringSoon(t.contractEnd) ? 'text-orange-500 font-medium' : 'text-gray-500'}>
-                          {fmtTs(t.contractEnd)}
-                          {isExpiringSoon(t.contractEnd) && ' ⚠️'}
-                        </span>
-                      </td>
-                      <td className="px-3 py-2.5"><Badge label={paymentCycleLabel[t.paymentCycle]} color="blue" /></td>
-                      <td className="px-3 py-2.5 font-medium">{t.rentAmount.toLocaleString('ar-SA')}</td>
-                      <td className="px-3 py-2.5">
-                        <Badge
-                          label={t.status === 'active' ? 'نشط' : t.status === 'expired' ? 'منتهي' : 'موقوف'}
-                          color={t.status === 'active' ? 'green' : 'red'}
-                        />
-                      </td>
-                      <td className="px-3 py-2.5">
-                        <div className="flex gap-1">
-                          <button
-                            onClick={() => setShowPayModal(t)}
-                            className="text-xs bg-[#1B4F72] text-white px-2 py-1 rounded hover:bg-[#2E86C1]"
-                          >
-                            دفعة
-                          </button>
-                          <button
-                            onClick={() => { setEditTenant(t); setShowTenantModal(true); }}
-                            className="text-xs border border-gray-200 px-2 py-1 rounded hover:bg-gray-50"
-                          >
-                            تعديل
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-
-          {/* ─── Payments Tab ─── */}
-          {tab === 'payments' && (
-            <div className="bg-white rounded-xl border border-gray-100 overflow-hidden">
-              <table className="w-full text-sm">
-                <thead className="bg-gray-50">
-                  <tr>
-                    {['تاريخ الدفع','الشقة','المستأجر','المطلوب','المدفوع','الرصيد','الطريقة','مرجع'].map(h => (
-                      <th key={h} className="px-3 py-2.5 text-right text-xs text-gray-500 font-medium">{h}</th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {payments.map(p => (
-                    <tr key={p.id} className="border-t border-gray-50 hover:bg-gray-50/50">
-                      <td className="px-3 py-2.5 text-xs text-gray-500">{fmtTs(p.paidDate)}</td>
-                      <td className="px-3 py-2.5 font-medium text-[#1B4F72]">{p.unitNumber}</td>
-                      <td className="px-3 py-2.5">{p.tenantName}</td>
-                      <td className="px-3 py-2.5">{p.amountDue.toLocaleString('ar-SA')}</td>
-                      <td className="px-3 py-2.5 text-green-600 font-medium">{p.amountPaid.toLocaleString('ar-SA')}</td>
-                      <td className="px-3 py-2.5">
-                        {p.balance > 0
-                          ? <span className="text-red-500 font-medium">{p.balance.toLocaleString('ar-SA')}</span>
-                          : <span className="text-green-500">—</span>}
-                      </td>
-                      <td className="px-3 py-2.5"><Badge label={methodLabel[p.paymentMethod]} color="blue" /></td>
-                      <td className="px-3 py-2.5 text-gray-400 text-xs">{p.referenceNumber || '—'}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-
-          {/* ─── Arrears Tab ─── */}
-          {tab === 'arrears' && (
-            <div>
-              <div className="grid grid-cols-3 gap-3 mb-4">
-                <div className="bg-white rounded-xl border border-gray-100 p-4 border-t-2 border-t-red-400">
-                  <div className="text-xs text-gray-400">إجمالي المتأخرات</div>
-                  <div className="text-xl font-medium text-red-600 mt-1">{totalArrears.toLocaleString('ar-SA')} ر.س</div>
-                </div>
-                <div className="bg-white rounded-xl border border-gray-100 p-4 border-t-2 border-t-orange-400">
-                  <div className="text-xs text-gray-400">عدد المتأخرين</div>
-                  <div className="text-xl font-medium text-orange-600 mt-1">{arrears.length}</div>
-                </div>
-                <div className="bg-white rounded-xl border border-gray-100 p-4 border-t-2 border-t-yellow-400">
-                  <div className="text-xs text-gray-400">عقود تنتهي قريباً (30 يوم)</div>
-                  <div className="text-xl font-medium text-yellow-600 mt-1">
-                    {tenants.filter(t => isExpiringSoon(t.contractEnd)).length}
-                  </div>
-                </div>
-              </div>
-              <div className="bg-white rounded-xl border border-gray-100 overflow-hidden">
-                <table className="w-full text-sm">
-                  <thead className="bg-gray-50">
-                    <tr>
-                      {['الشقة','المستأجر','الجوال','المبلغ المتأخر','دورة الدفع','إجراء'].map(h => (
-                        <th key={h} className="px-4 py-2.5 text-right text-xs text-gray-500 font-medium">{h}</th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {arrears.map(t => {
-                      const bal = payments.filter(p => p.tenantId === t.id).reduce((s, p) => s + (p.balance || 0), 0);
-                      return (
-                        <tr key={t.id} className="border-t border-gray-50 hover:bg-red-50/30">
-                          <td className="px-4 py-2.5 font-medium text-[#1B4F72]">{t.unitNumber}</td>
-                          <td className="px-4 py-2.5 font-medium">{t.name}</td>
-                          <td className="px-4 py-2.5 text-gray-500 text-xs">{t.phone}</td>
-                          <td className="px-4 py-2.5 font-medium text-red-600">{bal.toLocaleString('ar-SA')} ر.س</td>
-                          <td className="px-4 py-2.5"><Badge label={paymentCycleLabel[t.paymentCycle]} color="blue" /></td>
-                          <td className="px-4 py-2.5">
-                            <button
-                              onClick={() => setShowPayModal(t)}
-                              className="text-xs bg-[#1B4F72] text-white px-3 py-1 rounded hover:bg-[#2E86C1]"
-                            >
-                              تسجيل دفعة
-                            </button>
-                          </td>
-                        </tr>
-                      );
-                    })}
-                    {arrears.length === 0 && (
-                      <tr><td colSpan={6} className="px-4 py-8 text-center text-gray-300">لا توجد متأخرات ✓</td></tr>
-                    )}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          )}
-        </>
-      )}
-
-      {/* Modals */}
-      {showTenantModal && (
-        <TenantModal
-          tenant={editTenant}
-          propertyId={activeProperty.id}
-          onClose={() => { setShowTenantModal(false); setEditTenant(null); }}
-          onSaved={load}
-        />
-      )}
-      {showPayModal && (
-        <PaymentModal
-          tenant={showPayModal}
-          propertyId={activeProperty.id}
-          receivedBy={appUser?.uid || ''}
-          onClose={() => setShowPayModal(null)}
-          onSaved={load}
-        />
-      )}
-    </div>
-  );
+interface Property { id: string; name: string; }
+interface Tenant {
+  id: string; propertyId: string; unitId: string; unitNumber: string;
+  name: string; phone: string; idNumber: string; contractNumber: string;
+  contractStart: any; contractEnd: any; paymentCycle: string;
+  rentAmount: number; status: string; ejarLinked: boolean;
+}
+interface Payment {
+  id: string; tenantId: string; unitNumber: string; tenantName: string;
+  amountDue: number; amountPaid: number; balance: number;
+  paidDate: any; paymentMethod: string; referenceNumber: string;
 }
 
-// ─── Tenant Modal ─────────────────────────────────────────────────────────────
-function TenantModal({ tenant, propertyId, onClose, onSaved }: {
-  tenant: Tenant | null; propertyId: string; onClose: () => void; onSaved: () => void;
-}) {
-  const { register, handleSubmit, formState: { errors } } = useForm<any>({
-    defaultValues: tenant ? {
-      ...tenant,
-      contractStart: fmtInputDate(tenant.contractStart),
-      contractEnd:   fmtInputDate(tenant.contractEnd),
-    } : {}
-  });
-  const [saving, setSaving] = useState(false);
+const CYCLE: Record<string,string> = { monthly:'شهري', quarterly:'ربع سنوي', semi:'نصف سنوي', annual:'سنوي' };
+const METHOD: Record<string,string> = { transfer:'تحويل', cash:'كاش', ejar:'إيجار', stc_pay:'STC Pay' };
 
-  const onSubmit = async (data: any) => {
-    setSaving(true);
-    try {
-      const payload = {
-        ...data,
-        propertyId,
-        rentAmount:    Number(data.rentAmount),
-        contractStart: Timestamp.fromDate(new Date(data.contractStart)),
-        contractEnd:   Timestamp.fromDate(new Date(data.contractEnd)),
-        ejarLinked:    data.ejarLinked === 'true' || data.ejarLinked === true,
-        status:        'active' as const,
-      };
-      if (tenant?.id) {
-        await updateTenant(tenant.id, payload);
-        toast.success('تم تحديث بيانات المستأجر');
-      } else {
-        await createTenant(payload);
-        toast.success('تم إضافة المستأجر');
-      }
-      onSaved(); onClose();
-    } catch (e) {
-      toast.error('حدث خطأ أثناء الحفظ');
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  return (
-    <Modal title={tenant ? 'تعديل بيانات المستأجر' : 'إضافة مستأجر جديد'} onClose={onClose}>
-      <form onSubmit={handleSubmit(onSubmit)} className="space-y-3">
-        <div className="grid grid-cols-2 gap-3">
-          <FormField label="رقم الشقة" error={errors.unitNumber?.message as string}>
-            <input {...register('unitNumber', {required:'مطلوب'})} className={inputCls} placeholder="مثال: 05"/>
-          </FormField>
-          <FormField label="اسم المستأجر" error={errors.name?.message as string}>
-            <input {...register('name', {required:'مطلوب'})} className={inputCls}/>
-          </FormField>
-          <FormField label="رقم الجوال">
-            <input {...register('phone')} className={inputCls} placeholder="05xxxxxxxx"/>
-          </FormField>
-          <FormField label="رقم الهوية / الإقامة">
-            <input {...register('idNumber')} className={inputCls}/>
-          </FormField>
-          <FormField label="رقم العقد">
-            <input {...register('contractNumber')} className={inputCls}/>
-          </FormField>
-          <FormField label="قيمة الإيجار (ر.س)" error={errors.rentAmount?.message as string}>
-            <input {...register('rentAmount', {required:'مطلوب'})} type="number" className={inputCls}/>
-          </FormField>
-          <FormField label="بداية العقد">
-            <input {...register('contractStart', {required:'مطلوب'})} type="date" className={inputCls}/>
-          </FormField>
-          <FormField label="نهاية العقد">
-            <input {...register('contractEnd', {required:'مطلوب'})} type="date" className={inputCls}/>
-          </FormField>
-          <FormField label="دورة الدفع">
-            <select {...register('paymentCycle')} className={inputCls}>
-              <option value="monthly">شهري</option>
-              <option value="quarterly">ربع سنوي</option>
-              <option value="semi">نصف سنوي</option>
-              <option value="annual">سنوي</option>
-            </select>
-          </FormField>
-          <FormField label="ربط إيجار">
-            <select {...register('ejarLinked')} className={inputCls}>
-              <option value="false">لا</option>
-              <option value="true">نعم</option>
-            </select>
-          </FormField>
-        </div>
-        <FormField label="ملاحظات">
-          <textarea {...register('notes')} className={inputCls} rows={2}/>
-        </FormField>
-        <div className="flex gap-2 pt-2">
-          <button type="submit" disabled={saving} className={btnPrimary}>
-            {saving ? 'جارٍ الحفظ...' : tenant ? 'حفظ التعديلات' : 'إضافة المستأجر'}
-          </button>
-          <button type="button" onClick={onClose} className={btnSecondary}>إلغاء</button>
-        </div>
-      </form>
-    </Modal>
-  );
-}
-
-// ─── Payment Modal ─────────────────────────────────────────────────────────────
-function PaymentModal({ tenant, propertyId, receivedBy, onClose, onSaved }: {
-  tenant: Tenant; propertyId: string; receivedBy: string;
-  onClose: () => void; onSaved: () => void;
-}) {
-  const { register, handleSubmit } = useForm<any>({
-    defaultValues: { amountDue: tenant.rentAmount, amountPaid: tenant.rentAmount }
-  });
-  const [saving, setSaving] = useState(false);
-
-  const onSubmit = async (data: any) => {
-    setSaving(true);
-    try {
-      await createPayment({
-        propertyId,
-        tenantId:       tenant.id,
-        unitId:         tenant.unitId,
-        unitNumber:     tenant.unitNumber,
-        tenantName:     tenant.name,
-        dueDate:        Timestamp.fromDate(new Date()),
-        paidDate:       Timestamp.fromDate(new Date(data.paidDate || new Date())),
-        amountDue:      Number(data.amountDue),
-        amountPaid:     Number(data.amountPaid),
-        balance:        Number(data.amountDue) - Number(data.amountPaid),
-        paymentMethod:  data.paymentMethod,
-        referenceNumber: data.referenceNumber,
-        notes:          data.notes,
-        receivedBy,
-      });
-      toast.success('تم تسجيل الدفعة');
-      onSaved(); onClose();
-    } catch {
-      toast.error('حدث خطأ');
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  return (
-    <Modal title={`تسجيل دفعة — شقة ${tenant.unitNumber} (${tenant.name})`} onClose={onClose}>
-      <form onSubmit={handleSubmit(onSubmit)} className="space-y-3">
-        <div className="grid grid-cols-2 gap-3">
-          <FormField label="تاريخ الدفع">
-            <input {...register('paidDate')} type="date" className={inputCls}
-              defaultValue={new Date().toISOString().split('T')[0]}/>
-          </FormField>
-          <FormField label="طريقة الدفع">
-            <select {...register('paymentMethod')} className={inputCls}>
-              <option value="transfer">تحويل بنكي</option>
-              <option value="cash">كاش</option>
-              <option value="ejar">منصة إيجار</option>
-              <option value="stc_pay">STC Pay</option>
-            </select>
-          </FormField>
-          <FormField label="المبلغ المطلوب (ر.س)">
-            <input {...register('amountDue')} type="number" className={inputCls}/>
-          </FormField>
-          <FormField label="المبلغ المدفوع (ر.س)">
-            <input {...register('amountPaid')} type="number" className={inputCls}/>
-          </FormField>
-          <FormField label="رقم المرجع / الحوالة" cls="col-span-2">
-            <input {...register('referenceNumber')} className={inputCls}/>
-          </FormField>
-        </div>
-        <div className="flex gap-2 pt-2">
-          <button type="submit" disabled={saving} className={btnPrimary}>
-            {saving ? 'جارٍ الحفظ...' : 'تسجيل الدفعة'}
-          </button>
-          <button type="button" onClick={onClose} className={btnSecondary}>إلغاء</button>
-        </div>
-      </form>
-    </Modal>
-  );
-}
-
-// ─── Shared UI ────────────────────────────────────────────────────────────────
-function Modal({ title, onClose, children }: { title: string; onClose: () => void; children: React.ReactNode }) {
-  return (
-    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4" dir="rtl">
-      <div className="bg-white rounded-2xl w-full max-w-lg max-h-[90vh] overflow-y-auto shadow-2xl">
-        <div className="flex items-center justify-between p-5 border-b border-gray-100">
-          <h2 className="text-sm font-medium text-gray-800">{title}</h2>
-          <button onClick={onClose} className="text-gray-400 hover:text-gray-600 text-xl">✕</button>
-        </div>
-        <div className="p-5">{children}</div>
-      </div>
-    </div>
-  );
-}
-
-function FormField({ label, error, children, cls = '' }: {
-  label: string; error?: string; children: React.ReactNode; cls?: string;
-}) {
-  return (
-    <div className={cls}>
-      <label className="block text-xs text-gray-500 mb-1">{label}</label>
-      {children}
-      {error && <p className="text-red-500 text-xs mt-0.5">{error}</p>}
-    </div>
-  );
-}
-
-function Badge({ label, color }: { label: string; color: 'green' | 'red' | 'orange' | 'blue' }) {
-  const cls = {
-    green:  'bg-green-50 text-green-700',
-    red:    'bg-red-50 text-red-600',
-    orange: 'bg-orange-50 text-orange-600',
-    blue:   'bg-blue-50 text-blue-700',
-  }[color];
-  return <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${cls}`}>{label}</span>;
-}
-
-const inputCls    = 'w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400';
-const btnPrimary  = 'bg-[#1B4F72] text-white text-sm rounded-lg px-5 py-2 hover:bg-[#2E86C1] transition-colors disabled:opacity-60';
-const btnSecondary = 'border border-gray-200 text-gray-600 text-sm rounded-lg px-5 py-2 hover:bg-gray-50';
-
-function fmtTs(ts: any): string {
+function fmtDate(ts: any) {
   if (!ts) return '—';
   const d = ts?.toDate ? ts.toDate() : new Date(ts);
   return `${d.getDate().toString().padStart(2,'0')}/${(d.getMonth()+1).toString().padStart(2,'0')}/${d.getFullYear()}`;
 }
-function fmtInputDate(ts: any): string {
-  if (!ts) return '';
-  const d = ts?.toDate ? ts.toDate() : new Date(ts);
-  return d.toISOString().split('T')[0];
+
+export default function MonthlyPage() {
+  const router = useRouter();
+  const [properties, setProperties] = useState<Property[]>([]);
+  const [propId, setPropId] = useState('');
+  const [tenants, setTenants] = useState<Tenant[]>([]);
+  const [payments, setPayments] = useState<Payment[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [tab, setTab] = useState<'tenants'|'payments'|'arrears'>('tenants');
+  const [showTenant, setShowTenant] = useState(false);
+  const [showPay, setShowPay] = useState<Tenant|null>(null);
+  const [editTenant, setEditTenant] = useState<Tenant|null>(null);
+  const [saving, setSaving] = useState(false);
+  const [tf, setTf] = useState({ unitNumber:'', name:'', phone:'', idNumber:'', contractNumber:'', rentAmount:'', contractStart:'', contractEnd:'', paymentCycle:'monthly', ejarLinked:'false', status:'active' });
+  const [pf, setPf] = useState({ amountDue:'', amountPaid:'', paidDate:'', paymentMethod:'transfer', referenceNumber:'' });
+
+  useEffect(() => {
+    const unsub = onAuthStateChanged(auth, async (user) => {
+      if (!user) { router.push('/login'); return; }
+      const snap = await getDocs(query(collection(db,'properties'), where('ownerId','==',user.uid)));
+      const props = snap.docs.map(d => ({ id: d.id, name: (d.data() as any).name }));
+      setProperties(props);
+      if (props.length > 0) { setPropId(props[0].id); await loadData(props[0].id); }
+      setLoading(false);
+    });
+    return unsub;
+  }, []);
+
+  const loadData = async (pid: string) => {
+    const [ts, ps] = await Promise.all([
+      getDocs(query(collection(db,'tenants'), where('propertyId','==',pid))),
+      getDocs(query(collection(db,'rentPayments'), where('propertyId','==',pid))),
+    ]);
+    setTenants(ts.docs.map(d => ({ id: d.id, ...d.data() } as Tenant)));
+    setPayments(ps.docs.map(d => ({ id: d.id, ...d.data() } as Payment)));
+  };
+
+  const saveTenant = async () => {
+    if (!tf.unitNumber || !tf.name || !propId) return;
+    setSaving(true);
+    try {
+      const data = { ...tf, propertyId: propId, unitId: tf.unitNumber, rentAmount: Number(tf.rentAmount),
+        ejarLinked: tf.ejarLinked === 'true',
+        contractStart: tf.contractStart ? Timestamp.fromDate(new Date(tf.contractStart)) : null,
+        contractEnd: tf.contractEnd ? Timestamp.fromDate(new Date(tf.contractEnd)) : null };
+      if (editTenant) { await updateDoc(doc(db,'tenants',editTenant.id), data); }
+      else { await addDoc(collection(db,'tenants'), { ...data, createdAt: serverTimestamp() }); }
+      await loadData(propId); setShowTenant(false);
+    } catch(e) { alert('حدث خطأ'); }
+    setSaving(false);
+  };
+
+  const savePayment = async () => {
+    if (!showPay || !pf.amountPaid) return;
+    setSaving(true);
+    try {
+      await addDoc(collection(db,'rentPayments'), {
+        propertyId: propId, tenantId: showPay.id, unitId: showPay.unitId,
+        unitNumber: showPay.unitNumber, tenantName: showPay.name,
+        amountDue: Number(pf.amountDue || showPay.rentAmount),
+        amountPaid: Number(pf.amountPaid),
+        balance: Number(pf.amountDue || showPay.rentAmount) - Number(pf.amountPaid),
+        paymentMethod: pf.paymentMethod, referenceNumber: pf.referenceNumber,
+        paidDate: pf.paidDate ? Timestamp.fromDate(new Date(pf.paidDate)) : Timestamp.now(),
+        receivedBy: auth.currentUser?.uid, createdAt: serverTimestamp(),
+      });
+      await loadData(propId); setShowPay(null);
+    } catch(e) { alert('حدث خطأ'); }
+    setSaving(false);
+  };
+
+  const arrears = tenants.filter(t => {
+    if (t.status !== 'active') return false;
+    const bal = payments.filter(p => p.tenantId === t.id).reduce((s,p) => s + (p.balance||0), 0);
+    return bal > 0;
+  });
+
+  if (loading) return <div style={{display:'flex',justifyContent:'center',alignItems:'center',height:'100vh'}}><p>جارٍ التحميل...</p></div>;
+
+  return (
+    <div dir="rtl" style={{padding:'20px',fontFamily:'sans-serif',background:'#f9fafb',minHeight:'100vh'}}>
+      {/* Header */}
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'16px'}}>
+        <div style={{display:'flex',alignItems:'center',gap:'12px'}}>
+          <a href="/" style={{color:'#1B4F72',textDecoration:'none',fontSize:'13px'}}>← الرئيسية</a>
+          <h1 style={{margin:0,fontSize:'18px',color:'#1B4F72'}}>الإيجار الشهري</h1>
+        </div>
+        <div style={{display:'flex',gap:'8px',alignItems:'center'}}>
+          {properties.length > 1 && (
+            <select value={propId} onChange={e=>{setPropId(e.target.value);loadData(e.target.value);}} style={selectStyle}>
+              {properties.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}
+            </select>
+          )}
+          <button onClick={()=>{setEditTenant(null);setTf({unitNumber:'',name:'',phone:'',idNumber:'',contractNumber:'',rentAmount:'',contractStart:'',contractEnd:'',paymentCycle:'monthly',ejarLinked:'false',status:'active'});setShowTenant(true);}} style={btnPrimary}>+ مستأجر جديد</button>
+        </div>
+      </div>
+
+      {/* Tabs */}
+      <div style={{display:'flex',borderBottom:'2px solid #e5e7eb',marginBottom:'16px',gap:'4px'}}>
+        {([['tenants','المستأجرون'],['payments','الدفعات'],['arrears',`المتأخرات (${arrears.length})`]] as [string,string][]).map(([id,label])=>(
+          <button key={id} onClick={()=>setTab(id as any)} style={{padding:'8px 16px',border:'none',background:'none',cursor:'pointer',fontSize:'13px',borderBottom:`2px solid ${tab===id?'#1B4F72':'transparent'}`,color:tab===id?'#1B4F72':'#6b7280',marginBottom:'-2px'}}>
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {/* Tenants */}
+      {tab==='tenants' && (
+        <div style={{background:'#fff',borderRadius:'12px',border:'1px solid #e5e7eb',overflow:'hidden'}}>
+          <table style={{width:'100%',borderCollapse:'collapse',fontSize:'13px'}}>
+            <thead><tr style={{background:'#f9fafb'}}>
+              {['ش','المستأجر','الجوال','بداية العقد','نهاية العقد','دورة الدفع','الإيجار','الحالة',''].map(h=>(
+                <th key={h} style={{padding:'10px 12px',textAlign:'right',color:'#6b7280',fontWeight:'500',borderBottom:'1px solid #e5e7eb',whiteSpace:'nowrap'}}>{h}</th>
+              ))}
+            </tr></thead>
+            <tbody>
+              {tenants.length===0 && <tr><td colSpan={9} style={{padding:'40px',textAlign:'center',color:'#9ca3af'}}>لا يوجد مستأجرون — أضف مستأجراً جديداً</td></tr>}
+              {tenants.map((t,i)=>(
+                <tr key={t.id} style={{borderBottom:i<tenants.length-1?'1px solid #f3f4f6':'none'}}>
+                  <td style={{padding:'10px 12px',fontWeight:'600',color:'#1B4F72'}}>{t.unitNumber}</td>
+                  <td style={{padding:'10px 12px',fontWeight:'500'}}>{t.name}</td>
+                  <td style={{padding:'10px 12px',color:'#6b7280'}}>{t.phone}</td>
+                  <td style={{padding:'10px 12px',color:'#6b7280',fontSize:'12px'}}>{fmtDate(t.contractStart)}</td>
+                  <td style={{padding:'10px 12px',color:'#6b7280',fontSize:'12px'}}>{fmtDate(t.contractEnd)}</td>
+                  <td style={{padding:'10px 12px'}}><span style={{background:'#dbeafe',color:'#1d4ed8',padding:'2px 8px',borderRadius:'10px',fontSize:'11px'}}>{CYCLE[t.paymentCycle]||t.paymentCycle}</span></td>
+                  <td style={{padding:'10px 12px',fontWeight:'500'}}>{t.rentAmount?.toLocaleString('ar-SA')} ر.س</td>
+                  <td style={{padding:'10px 12px'}}><span style={{background:t.status==='active'?'#d1fae5':'#fee2e2',color:t.status==='active'?'#065f46':'#991b1b',padding:'2px 8px',borderRadius:'10px',fontSize:'11px'}}>{t.status==='active'?'نشط':'منتهي'}</span></td>
+                  <td style={{padding:'10px 12px'}}>
+                    <div style={{display:'flex',gap:'6px'}}>
+                      <button onClick={()=>setShowPay(t)} style={{padding:'4px 10px',background:'#1B4F72',color:'#fff',border:'none',borderRadius:'6px',cursor:'pointer',fontSize:'12px'}}>دفعة</button>
+                      <button onClick={()=>{setEditTenant(t);setTf({unitNumber:t.unitNumber,name:t.name,phone:t.phone||'',idNumber:t.idNumber||'',contractNumber:t.contractNumber||'',rentAmount:String(t.rentAmount),contractStart:'',contractEnd:'',paymentCycle:t.paymentCycle,ejarLinked:String(t.ejarLinked),status:t.status});setShowTenant(true);}} style={{padding:'4px 10px',border:'1px solid #d1d5db',borderRadius:'6px',background:'#fff',cursor:'pointer',fontSize:'12px'}}>تعديل</button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {/* Payments */}
+      {tab==='payments' && (
+        <div style={{background:'#fff',borderRadius:'12px',border:'1px solid #e5e7eb',overflow:'hidden'}}>
+          <table style={{width:'100%',borderCollapse:'collapse',fontSize:'13px'}}>
+            <thead><tr style={{background:'#f9fafb'}}>
+              {['تاريخ الدفع','الشقة','المستأجر','المطلوب','المدفوع','الرصيد','الطريقة','مرجع'].map(h=>(
+                <th key={h} style={{padding:'10px 12px',textAlign:'right',color:'#6b7280',fontWeight:'500',borderBottom:'1px solid #e5e7eb'}}>{h}</th>
+              ))}
+            </tr></thead>
+            <tbody>
+              {payments.length===0 && <tr><td colSpan={8} style={{padding:'40px',textAlign:'center',color:'#9ca3af'}}>لا توجد دفعات مسجلة</td></tr>}
+              {payments.map((p,i)=>(
+                <tr key={p.id} style={{borderBottom:i<payments.length-1?'1px solid #f3f4f6':'none'}}>
+                  <td style={{padding:'10px 12px',color:'#6b7280',fontSize:'12px'}}>{fmtDate(p.paidDate)}</td>
+                  <td style={{padding:'10px 12px',fontWeight:'600',color:'#1B4F72'}}>{p.unitNumber}</td>
+                  <td style={{padding:'10px 12px'}}>{p.tenantName}</td>
+                  <td style={{padding:'10px 12px'}}>{p.amountDue?.toLocaleString('ar-SA')}</td>
+                  <td style={{padding:'10px 12px',color:'#16a34a',fontWeight:'500'}}>{p.amountPaid?.toLocaleString('ar-SA')}</td>
+                  <td style={{padding:'10px 12px',color:p.balance>0?'#dc2626':'#16a34a'}}>{p.balance>0?p.balance?.toLocaleString('ar-SA'):'✓'}</td>
+                  <td style={{padding:'10px 12px'}}><span style={{background:'#dbeafe',color:'#1d4ed8',padding:'2px 8px',borderRadius:'10px',fontSize:'11px'}}>{METHOD[p.paymentMethod]||p.paymentMethod}</span></td>
+                  <td style={{padding:'10px 12px',color:'#9ca3af',fontSize:'12px'}}>{p.referenceNumber||'—'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {/* Arrears */}
+      {tab==='arrears' && (
+        <div>
+          <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:'12px',marginBottom:'16px'}}>
+            {[['إجمالي المتأخرات',arrears.reduce((s,t)=>s+payments.filter(p=>p.tenantId===t.id).reduce((x,p)=>x+(p.balance||0),0),0).toLocaleString('ar-SA')+' ر.س','#dc2626'],['عدد المتأخرين',arrears.length,'#d97706'],['من المستأجرين النشطين',tenants.filter(t=>t.status==='active').length,'#1B4F72']].map(([l,v,c])=>(
+              <div key={String(l)} style={{background:'#fff',borderRadius:'12px',padding:'16px',border:'1px solid #e5e7eb',textAlign:'center'}}>
+                <div style={{fontSize:'20px',fontWeight:'600',color:String(c)}}>{v}</div>
+                <div style={{fontSize:'12px',color:'#6b7280',marginTop:'4px'}}>{l}</div>
+              </div>
+            ))}
+          </div>
+          <div style={{background:'#fff',borderRadius:'12px',border:'1px solid #e5e7eb',overflow:'hidden'}}>
+            <table style={{width:'100%',borderCollapse:'collapse',fontSize:'13px'}}>
+              <thead><tr style={{background:'#f9fafb'}}>
+                {['الشقة','المستأجر','الجوال','المبلغ المتأخر','دورة الدفع','إجراء'].map(h=>(
+                  <th key={h} style={{padding:'10px 12px',textAlign:'right',color:'#6b7280',fontWeight:'500',borderBottom:'1px solid #e5e7eb'}}>{h}</th>
+                ))}
+              </tr></thead>
+              <tbody>
+                {arrears.length===0 && <tr><td colSpan={6} style={{padding:'40px',textAlign:'center',color:'#9ca3af'}}>لا توجد متأخرات ✓</td></tr>}
+                {arrears.map((t,i)=>{
+                  const bal=payments.filter(p=>p.tenantId===t.id).reduce((s,p)=>s+(p.balance||0),0);
+                  return (
+                    <tr key={t.id} style={{borderBottom:i<arrears.length-1?'1px solid #f3f4f6':'none',background:'#fff9f9'}}>
+                      <td style={{padding:'10px 12px',fontWeight:'600',color:'#1B4F72'}}>{t.unitNumber}</td>
+                      <td style={{padding:'10px 12px',fontWeight:'500'}}>{t.name}</td>
+                      <td style={{padding:'10px 12px',color:'#6b7280'}}>{t.phone}</td>
+                      <td style={{padding:'10px 12px',fontWeight:'600',color:'#dc2626'}}>{bal.toLocaleString('ar-SA')} ر.س</td>
+                      <td style={{padding:'10px 12px'}}><span style={{background:'#dbeafe',color:'#1d4ed8',padding:'2px 8px',borderRadius:'10px',fontSize:'11px'}}>{CYCLE[t.paymentCycle]}</span></td>
+                      <td style={{padding:'10px 12px'}}><button onClick={()=>setShowPay(t)} style={{padding:'5px 12px',background:'#1B4F72',color:'#fff',border:'none',borderRadius:'6px',cursor:'pointer',fontSize:'12px'}}>تسجيل دفعة</button></td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {/* Tenant Modal */}
+      {showTenant && (
+        <div style={{position:'fixed',inset:'0',background:'rgba(0,0,0,0.5)',display:'flex',alignItems:'center',justifyContent:'center',zIndex:1000}} onClick={()=>setShowTenant(false)}>
+          <div style={{background:'#fff',borderRadius:'16px',padding:'24px',width:'520px',maxWidth:'95vw',maxHeight:'90vh',overflowY:'auto'}} onClick={e=>e.stopPropagation()}>
+            <div style={{display:'flex',justifyContent:'space-between',marginBottom:'20px'}}>
+              <h2 style={{margin:0,fontSize:'16px',color:'#1B4F72'}}>{editTenant?'تعديل المستأجر':'إضافة مستأجر جديد'}</h2>
+              <button onClick={()=>setShowTenant(false)} style={{border:'none',background:'none',fontSize:'20px',cursor:'pointer',color:'#6b7280'}}>✕</button>
+            </div>
+            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'12px'}}>
+              {[['unitNumber','رقم الشقة','05'],['name','اسم المستأجر',''],['phone','رقم الجوال','05xxxxxxxx'],['idNumber','رقم الهوية',''],['contractNumber','رقم العقد',''],['rentAmount','قيمة الإيجار (ر.س)','2000'],['contractStart','بداية العقد','date'],['contractEnd','نهاية العقد','date']].map(([k,l,p])=>(
+                <div key={k}>
+                  <label style={{display:'block',fontSize:'12px',color:'#6b7280',marginBottom:'4px'}}>{l}</label>
+                  <input type={p==='date'?'date':'text'} value={(tf as any)[k]} placeholder={p!=='date'?p:''} onChange={e=>setTf(f=>({...f,[k]:e.target.value}))}
+                    style={{width:'100%',border:'1px solid #d1d5db',borderRadius:'8px',padding:'8px 12px',fontSize:'13px',boxSizing:'border-box'}}/>
+                </div>
+              ))}
+              <div>
+                <label style={{display:'block',fontSize:'12px',color:'#6b7280',marginBottom:'4px'}}>دورة الدفع</label>
+                <select value={tf.paymentCycle} onChange={e=>setTf(f=>({...f,paymentCycle:e.target.value}))} style={{width:'100%',border:'1px solid #d1d5db',borderRadius:'8px',padding:'8px 12px',fontSize:'13px'}}>
+                  <option value="monthly">شهري</option><option value="quarterly">ربع سنوي</option><option value="semi">نصف سنوي</option><option value="annual">سنوي</option>
+                </select>
+              </div>
+              <div>
+                <label style={{display:'block',fontSize:'12px',color:'#6b7280',marginBottom:'4px'}}>ربط إيجار</label>
+                <select value={tf.ejarLinked} onChange={e=>setTf(f=>({...f,ejarLinked:e.target.value}))} style={{width:'100%',border:'1px solid #d1d5db',borderRadius:'8px',padding:'8px 12px',fontSize:'13px'}}>
+                  <option value="false">لا</option><option value="true">نعم</option>
+                </select>
+              </div>
+            </div>
+            <div style={{display:'flex',gap:'8px',marginTop:'20px'}}>
+              <button onClick={saveTenant} disabled={saving} style={btnPrimary}>{saving?'جارٍ الحفظ...':editTenant?'حفظ التعديلات':'إضافة المستأجر'}</button>
+              <button onClick={()=>setShowTenant(false)} style={btnOutline}>إلغاء</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Payment Modal */}
+      {showPay && (
+        <div style={{position:'fixed',inset:'0',background:'rgba(0,0,0,0.5)',display:'flex',alignItems:'center',justifyContent:'center',zIndex:1000}} onClick={()=>setShowPay(null)}>
+          <div style={{background:'#fff',borderRadius:'16px',padding:'24px',width:'420px',maxWidth:'95vw'}} onClick={e=>e.stopPropagation()}>
+            <div style={{display:'flex',justifyContent:'space-between',marginBottom:'16px'}}>
+              <h2 style={{margin:0,fontSize:'16px',color:'#1B4F72'}}>دفعة — شقة {showPay.unitNumber} ({showPay.name})</h2>
+              <button onClick={()=>setShowPay(null)} style={{border:'none',background:'none',fontSize:'20px',cursor:'pointer',color:'#6b7280'}}>✕</button>
+            </div>
+            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'12px'}}>
+              {[['amountDue','المبلغ المطلوب',String(showPay.rentAmount)],['amountPaid','المبلغ المدفوع',''],['referenceNumber','رقم المرجع','']].map(([k,l,p])=>(
+                <div key={k} style={{gridColumn:k==='referenceNumber'?'1 / -1':'auto'}}>
+                  <label style={{display:'block',fontSize:'12px',color:'#6b7280',marginBottom:'4px'}}>{l}</label>
+                  <input type="number" value={(pf as any)[k]} placeholder={p} onChange={e=>setPf(f=>({...f,[k]:e.target.value}))}
+                    style={{width:'100%',border:'1px solid #d1d5db',borderRadius:'8px',padding:'8px 12px',fontSize:'13px',boxSizing:'border-box'}}/>
+                </div>
+              ))}
+              <div>
+                <label style={{display:'block',fontSize:'12px',color:'#6b7280',marginBottom:'4px'}}>تاريخ الدفع</label>
+                <input type="date" value={pf.paidDate} onChange={e=>setPf(f=>({...f,paidDate:e.target.value}))} style={{width:'100%',border:'1px solid #d1d5db',borderRadius:'8px',padding:'8px 12px',fontSize:'13px',boxSizing:'border-box'}}/>
+              </div>
+              <div>
+                <label style={{display:'block',fontSize:'12px',color:'#6b7280',marginBottom:'4px'}}>طريقة الدفع</label>
+                <select value={pf.paymentMethod} onChange={e=>setPf(f=>({...f,paymentMethod:e.target.value}))} style={{width:'100%',border:'1px solid #d1d5db',borderRadius:'8px',padding:'8px 12px',fontSize:'13px'}}>
+                  <option value="transfer">تحويل بنكي</option><option value="cash">كاش</option><option value="ejar">منصة إيجار</option><option value="stc_pay">STC Pay</option>
+                </select>
+              </div>
+            </div>
+            <div style={{display:'flex',gap:'8px',marginTop:'20px'}}>
+              <button onClick={savePayment} disabled={saving} style={btnPrimary}>{saving?'جارٍ الحفظ...':'تسجيل الدفعة'}</button>
+              <button onClick={()=>setShowPay(null)} style={btnOutline}>إلغاء</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
 }
-function isExpiringSoon(ts: any): boolean {
-  if (!ts) return false;
-  const d = ts?.toDate ? ts.toDate() : new Date(ts);
-  return (d.getTime() - Date.now()) < 30 * 86400000;
-}
-function PageLoader() {
-  return <div className="flex justify-center py-12"><div className="w-7 h-7 border-4 border-blue-500 border-t-transparent rounded-full animate-spin"/></div>;
-}
-function NoProperty() {
-  return <div className="flex items-center justify-center h-64 text-gray-400 text-sm">يرجى اختيار عقار أولاً</div>;
-}
+
+const btnPrimary: React.CSSProperties = {padding:'8px 18px',background:'#1B4F72',color:'#fff',border:'none',borderRadius:'8px',cursor:'pointer',fontSize:'13px',fontFamily:'sans-serif'};
+const btnOutline: React.CSSProperties = {padding:'8px 18px',background:'#fff',color:'#374151',border:'1px solid #d1d5db',borderRadius:'8px',cursor:'pointer',fontSize:'13px',fontFamily:'sans-serif'};
+const selectStyle: React.CSSProperties = {border:'1px solid #d1d5db',borderRadius:'8px',padding:'7px 12px',fontSize:'13px',background:'#fff'};
