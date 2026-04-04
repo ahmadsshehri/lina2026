@@ -9,24 +9,6 @@ interface Property { id: string; name: string; }
 interface Transfer { id: string; type: string; amount: number; date: any; fromUser: string; toUser: string; paymentMethod: string; notes: string; }
 interface MonthReport { monthlyRevenue: number; furnishedRevenue: number; totalRevenue: number; totalExpenses: number; netProfit: number; }
 
-async function getPropertiesForUser(uid: string) {
-  const userSnap = await getDoc(doc(db, 'users', uid));
-  if (!userSnap.exists()) return [];
-  const userData = userSnap.data() as any;
-  if (userData.role === 'owner') {
-    const snap = await getDocs(query(collection(db, 'properties'), where('ownerId', '==', uid)));
-    return snap.docs.map(d => ({ id: d.id, name: (d.data() as any).name }));
-  }
-  const ids: string[] = userData.propertyIds || [];
-  if (ids.length === 0) return [];
-  const results: any[] = [];
-  for (let i = 0; i < ids.length; i += 10) {
-    const chunk = ids.slice(i, i + 10);
-    const snap = await getDocs(query(collection(db, 'properties'), where('__name__', 'in', chunk)));
-    snap.docs.forEach(d => results.push({ id: d.id, name: (d.data() as any).name }));
-  }
-  return results;
-}
 
 function fmtDate(ts: any) {
   if (!ts) return '—';
@@ -39,6 +21,25 @@ function currentMonthStr() {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
 }
 
+
+async function loadPropertiesForUser(uid: string) {
+  const userSnap = await getDoc(doc(db, 'users', uid));
+  if (!userSnap.exists()) return [];
+  const userData = userSnap.data() as any;
+  if (userData.role === 'owner') {
+    const snap = await getDocs(query(collection(db, 'properties'), where('ownerId', '==', uid)));
+    return snap.docs.map((d: any) => ({ id: d.id, name: d.data().name }));
+  }
+  const ids: string[] = userData.propertyIds || [];
+  if (ids.length === 0) return [];
+  const results: any[] = [];
+  for (let i = 0; i < ids.length; i += 10) {
+    const chunk = ids.slice(i, i + 10);
+    const snap = await getDocs(query(collection(db, 'properties'), where('__name__', 'in', chunk)));
+    snap.docs.forEach((d: any) => results.push({ id: d.id, name: d.data().name }));
+  }
+  return results;
+}
 export default function CashflowPage() {
   const router = useRouter();
   const [properties, setProperties] = useState<Property[]>([]);
@@ -54,7 +55,7 @@ export default function CashflowPage() {
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, async (user) => {
       if (!user) { router.push('/login'); return; }
-      const props = await getPropertiesForUser(user.uid);
+      const props = await loadPropertiesForUser(user.uid);
       setProperties(props);
       if (props.length > 0) {
         setPropId(props[0].id);
