@@ -209,9 +209,9 @@ export default function FurnishedPage() {
 
         {/* Filter chips */}
         <div style={{display:'flex',gap:'8px',marginBottom:'12px',overflowX:'auto',paddingBottom:'4px'}}>
-          {[['all','الكل'],['confirmed','مؤكد'],['checkedin','وصل'],['checkedout','غادر'],['cancelled','ملغي']].map(([v,l])=>(
-            <button key={v} onClick={()=>setFilterStatus(v)}
-              style={{padding:'7px 14px',border:'none',borderRadius:'20px',cursor:'pointer',fontSize:'12px',fontWeight:'500',whiteSpace:'nowrap',background:filterStatus===v?'#1B4F72':'#fff',color:filterStatus===v?'#fff':'#374151',border:filterStatus===v?'none':'1px solid #e5e7eb'}}>
+        {[['all','الكل'],['confirmed','مؤكد'],['checkedin','وصل'],['checkedout','غادر'],['cancelled','ملغي']].map(([v,l])=>(
+  <button key={v} onClick={()=>setFilterStatus(v)}
+    style={{padding:'7px 14px',borderRadius:'20px',cursor:'pointer',fontSize:'12px',fontWeight:'500',whiteSpace:'nowrap',background:filterStatus===v?'#1B4F72':'#fff',color:filterStatus===v?'#fff':'#374151',border:filterStatus===v?'none':'1px solid #e5e7eb'}}>}>
               {l}
             </button>
           ))}
