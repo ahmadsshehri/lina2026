@@ -26,6 +26,26 @@ const STATUS_LABEL: Record<string, string> = { occupied: 'مشغول', vacant: '
 const TYPE_COLOR: Record<string, string> = { monthly: '#dbeafe', furnished: '#d1fae5', owner: '#fef3c7' };
 const STATUS_DOT: Record<string, string> = { occupied: '#16a34a', vacant: '#dc2626', maintenance: '#d97706' };
 
+
+async function getPropertiesForUserLocal(uid: string) {
+  const userSnap = await getDoc(doc(db, 'users', uid));
+  if (!userSnap.exists()) return [];
+  const userData = userSnap.data() as any;
+  if (userData.role === 'owner') {
+    const snap = await getDocs(query(collection(db, 'properties'), where('ownerId', '==', uid)));
+    return snap.docs.map(d => ({ id: d.id, name: (d.data() as any).name }));
+  }
+  const ids: string[] = userData.propertyIds || [];
+  if (ids.length === 0) return [];
+  const results: any[] = [];
+  for (let i = 0; i < ids.length; i += 10) {
+    const chunk = ids.slice(i, i + 10);
+    const snap = await getDocs(query(collection(db, 'properties'), where('__name__', 'in', chunk)));
+    snap.docs.forEach(d => results.push({ id: d.id, name: (d.data() as any).name }));
+  }
+  return results;
+}
+
 export default function UnitsPage() {
   const router = useRouter();
   const [units, setUnits] = useState<Unit[]>([]);
