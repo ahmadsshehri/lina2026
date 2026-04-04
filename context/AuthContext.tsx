@@ -1,7 +1,11 @@
-// context/AuthContext.tsx
 'use client';
 import { createContext, useContext, useEffect, useState, ReactNode } from 'react';
-import { onAuthStateChanged, signInWithEmailAndPassword, signOut, User } from 'firebase/auth';
+import {
+  onAuthStateChanged,
+  signInWithEmailAndPassword,
+  signOut,
+  User
+} from 'firebase/auth';
 import { auth } from '../lib/firebase';
 import { getUserDoc } from '../lib/db';
 import { useStore } from '../store/useStore';
@@ -27,9 +31,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const unsub = onAuthStateChanged(auth, async (fbUser) => {
       setFirebaseUser(fbUser);
       if (fbUser) {
-        const userData = await getUserDoc(fbUser.uid);
-        setAppUser(userData);
-        setStoreUser(userData);
+        try {
+          const userData = await getUserDoc(fbUser.uid);
+          setAppUser(userData);
+          setStoreUser(userData);
+        } catch (e) {
+          console.error('Error fetching user doc:', e);
+        }
       } else {
         setAppUser(null);
         setStoreUser(null);
@@ -40,7 +48,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const login = async (email: string, password: string) => {
-    await signInWithEmailAndPassword(auth, email, password);
+    const result = await signInWithEmailAndPassword(auth, email.trim(), password);
+    console.log('Login success:', result.user.uid);
   };
 
   const logout = async () => {
