@@ -21,6 +21,25 @@ const MENU = [
   { label:'المستخدمون',        sub:'الصلاحيات والأدوار',    icon:'👥', href:'/users',     color:'#7c2d12', bg:'#fff7ed', dark:'#6c2410' },
 ];
 
+
+async function loadPropertiesForUser(uid: string) {
+  const userSnap = await getDoc(doc(db, 'users', uid));
+  if (!userSnap.exists()) return [];
+  const userData = userSnap.data() as any;
+  if (userData.role === 'owner') {
+    const snap = await getDocs(query(collection(db, 'properties'), where('ownerId', '==', uid)));
+    return snap.docs.map((d: any) => ({ id: d.id, name: d.data().name }));
+  }
+  const ids: string[] = userData.propertyIds || [];
+  if (ids.length === 0) return [];
+  const results: any[] = [];
+  for (let i = 0; i < ids.length; i += 10) {
+    const chunk = ids.slice(i, i + 10);
+    const snap = await getDocs(query(collection(db, 'properties'), where('__name__', 'in', chunk)));
+    snap.docs.forEach((d: any) => results.push({ id: d.id, name: d.data().name }));
+  }
+  return results;
+}
 export default function HomePage() {
   const router = useRouter();
   const [loading, setLoading] = useState(true);
@@ -35,23 +54,7 @@ export default function HomePage() {
       const userSnap = await getDocs(query(collection(db,'users'), where('__name__','==',fbUser.uid)));
       if (!userSnap.empty) setUser(userSnap.docs[0].data() as AppUser);
       // Load properties
-      // Load properties based on role
-      const userDoc2 = await getDoc(doc(db,'users',fbUser.uid));
-      let props: Property[] = [];
-      if (userDoc2.exists()) {
-        const ud = userDoc2.data() as any;
-        if (ud.role === 'owner') {
-          const propSnap = await getDocs(query(collection(db,'properties'), where('ownerId','==',fbUser.uid)));
-          props = propSnap.docs.map(d => ({ id: d.id, ...d.data() } as Property));
-        } else {
-          const ids: string[] = ud.propertyIds || [];
-          for (let i = 0; i < ids.length; i += 10) {
-            const chunk = ids.slice(i, i + 10);
-            const propSnap = await getDocs(query(collection(db,'properties'), where('__name__','in',chunk)));
-            propSnap.docs.forEach(d => props.push({ id: d.id, ...d.data() } as Property));
-          }
-        }
-      }
+      const props = await loadPropertiesForUser(fbUser.uid);
       setProperties(props);
       // Load quick stats
       if (props.length > 0) {
