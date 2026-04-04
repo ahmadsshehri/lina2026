@@ -1,109 +1,94 @@
 'use client';
-import { useState } from 'react';
-import { signInWithEmailAndPassword } from 'firebase/auth';
+import { useEffect, useState } from 'react';
+import { onAuthStateChanged } from 'firebase/auth';
 import { auth } from '../lib/firebase';
 import { useRouter } from 'next/navigation';
 
-export default function LoginPage() {
-  const router    = useRouter();
-  const [email,    setEmail]    = useState('');
-  const [password, setPassword] = useState('');
-  const [error,    setError]    = useState('');
-  const [loading,  setLoading]  = useState(false);
+export default function HomePage() {
+  const router = useRouter();
+  const [checking, setChecking] = useState(true);
+  const [authed,   setAuthed]   = useState(false);
 
-  const handleLogin = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setError('');
-    setLoading(true);
-    try {
-      await signInWithEmailAndPassword(auth, email.trim(), password);
-      router.push('/');
-    } catch (err: any) {
-      console.error(err.code, err.message);
-      const msgs: Record<string, string> = {
-        'auth/invalid-credential':  'البريد أو كلمة المرور غير صحيحة',
-        'auth/wrong-password':      'كلمة المرور غير صحيحة',
-        'auth/user-not-found':      'المستخدم غير موجود',
-        'auth/invalid-email':       'البريد الإلكتروني غير صحيح',
-        'auth/too-many-requests':   'محاولات كثيرة، انتظر قليلاً',
-        'auth/network-request-failed': 'مشكلة في الاتصال بالإنترنت',
-      };
-      setError(msgs[err.code] || `خطأ: ${err.code}`);
-    } finally {
-      setLoading(false);
-    }
-  };
+  useEffect(() => {
+    const unsub = onAuthStateChanged(auth, (user) => {
+      if (user) {
+        setAuthed(true);
+      } else {
+        router.push('/login');
+      }
+      setChecking(false);
+    });
+    return unsub;
+  }, []);
+
+  if (checking) return (
+    <div style={{
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+      height: '100vh', flexDirection: 'column', gap: '12px', background: '#f9fafb'
+    }}>
+      <div style={{
+        width: '32px', height: '32px',
+        border: '3px solid #1B4F72', borderTopColor: 'transparent',
+        borderRadius: '50%', animation: 'spin 0.8s linear infinite'
+      }}/>
+      <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+      <p style={{ color: '#6b7280', fontSize: '14px' }}>جارٍ التحقق...</p>
+    </div>
+  );
+
+  if (!authed) return null;
 
   return (
-    <div
-      className="min-h-screen flex items-center justify-center bg-[#1B4F72]"
-      dir="rtl"
-    >
-      <div className="w-full max-w-sm mx-4">
-        <div className="text-center mb-8">
-          <div className="w-16 h-16 bg-white/10 rounded-2xl flex items-center justify-center mx-auto mb-4">
-            <span className="text-3xl">🏢</span>
-          </div>
-          <h1 className="text-white text-xl font-medium">نظام إدارة العقارات</h1>
-          <p className="text-white/50 text-sm mt-1">Property Management System</p>
+    <div dir="rtl" style={{ padding: '24px', fontFamily: 'sans-serif', minHeight: '100vh', background: '#f9fafb' }}>
+
+      <div style={{ marginBottom: '24px', borderBottom: '1px solid #e5e7eb', paddingBottom: '16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <div>
+          <h1 style={{ fontSize: '20px', fontWeight: '600', color: '#1B4F72', margin: 0 }}>
+            نظام إدارة العقارات
+          </h1>
+          <p style={{ fontSize: '13px', color: '#6b7280', margin: '4px 0 0' }}>
+            لوحة التحكم الرئيسية
+          </p>
         </div>
+        <button
+          onClick={() => { auth.signOut(); router.push('/login'); }}
+          style={{
+            padding: '8px 16px', background: '#fee2e2', color: '#dc2626',
+            border: 'none', borderRadius: '8px', cursor: 'pointer', fontSize: '13px'
+          }}
+        >
+          تسجيل الخروج
+        </button>
+      </div>
 
-        <div className="bg-white rounded-2xl p-8 shadow-2xl">
-          <h2 className="text-gray-800 text-lg font-medium mb-6">تسجيل الدخول</h2>
-          <form onSubmit={handleLogin} className="space-y-4">
-
-            <div>
-              <label className="block text-xs text-gray-500 mb-1.5">
-                البريد الإلكتروني
-              </label>
-              <input
-                type="email"
-                value={email}
-                onChange={e => setEmail(e.target.value)}
-                className="w-full border border-gray-200 rounded-lg px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                placeholder="example@email.com"
-                dir="ltr"
-                required
-                autoComplete="email"
-              />
-            </div>
-
-            <div>
-              <label className="block text-xs text-gray-500 mb-1.5">
-                كلمة المرور
-              </label>
-              <input
-                type="password"
-                value={password}
-                onChange={e => setPassword(e.target.value)}
-                className="w-full border border-gray-200 rounded-lg px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                placeholder="••••••••"
-                required
-                autoComplete="current-password"
-              />
-            </div>
-
-            {error && (
-              <div className="bg-red-50 border border-red-200 rounded-lg px-4 py-3 text-sm text-red-600 text-center">
-                {error}
-              </div>
-            )}
-
-            <button
-              type="submit"
-              disabled={loading}
-              className="w-full bg-[#1B4F72] text-white rounded-lg py-2.5 text-sm font-medium hover:bg-[#2E86C1] transition-colors disabled:opacity-60 flex items-center justify-center gap-2"
-            >
-              {loading ? (
-                <>
-                  <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"/>
-                  جارٍ الدخول...
-                </>
-              ) : 'دخول'}
-            </button>
-
-          </form>
-        </div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '16px' }}>
+        {[
+          { label: 'الإيجار الشهري',    icon: '📋', href: '/monthly',   color: '#dbeafe', border: '#93c5fd' },
+          { label: 'الشقق المفروشة',    icon: '🏨', href: '/furnished', color: '#d1fae5', border: '#6ee7b7' },
+          { label: 'المصاريف',          icon: '💳', href: '/expenses',  color: '#fef3c7', border: '#fcd34d' },
+          { label: 'التقارير',          icon: '📊', href: '/reports',   color: '#ede9fe', border: '#c4b5fd' },
+          { label: 'تقويم الحجوزات',   icon: '📅', href: '/calendar',  color: '#fce7f3', border: '#f9a8d4' },
+          { label: 'التدفق المالي',     icon: '💰', href: '/cashflow',  color: '#ecfdf5', border: '#6ee7b7' },
+          { label: 'الوحدات والعقارات', icon: '🏢', href: '/units',     color: '#f0f9ff', border: '#7dd3fc' },
+          { label: 'المستخدمون',        icon: '👥', href: '/users',     color: '#fff7ed', border: '#fdba74' },
+        ].map(card => (
+          
+            key={card.href}
+            href={card.href}
+            style={{
+              display: 'flex', flexDirection: 'column', alignItems: 'center',
+              justifyContent: 'center', padding: '28px 16px',
+              background: card.color, border: `1px solid ${card.border}`,
+              borderRadius: '12px', textDecoration: 'none', color: '#1f2937',
+              cursor: 'pointer', gap: '10px', transition: 'transform 0.15s'
+            }}
+            onMouseOver={e => (e.currentTarget.style.transform = 'translateY(-2px)')}
+            onMouseOut={e  => (e.currentTarget.style.transform = 'translateY(0)')}
+          >
+            <span style={{ fontSize: '36px' }}>{card.icon}</span>
+            <span style={{ fontSize: '14px', fontWeight: '500', textAlign: 'center' }}>{card.label}</span>
+          </a>
+        ))}
       </div>
     </div>
   );
