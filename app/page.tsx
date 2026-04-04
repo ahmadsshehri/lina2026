@@ -2,7 +2,7 @@
 import { useEffect, useState } from 'react';
 import { onAuthStateChanged } from 'firebase/auth';
 import { auth, db } from '../lib/firebase';
-import { collection, getDocs, query, where } from 'firebase/firestore';
+import { collection, getDocs, query, where, doc, getDoc } from 'firebase/firestore';
 import { useRouter } from 'next/navigation';
 
 interface Property { id: string; name: string; city: string; totalUnits: number; }
@@ -35,8 +35,23 @@ export default function HomePage() {
       const userSnap = await getDocs(query(collection(db,'users'), where('__name__','==',fbUser.uid)));
       if (!userSnap.empty) setUser(userSnap.docs[0].data() as AppUser);
       // Load properties
-      const propSnap = await getDocs(query(collection(db,'properties'), where('ownerId','==',fbUser.uid)));
-      const props = propSnap.docs.map(d => ({ id: d.id, ...d.data() } as Property));
+      // Load properties based on role
+      const userDoc2 = await getDoc(doc(db,'users',fbUser.uid));
+      let props: Property[] = [];
+      if (userDoc2.exists()) {
+        const ud = userDoc2.data() as any;
+        if (ud.role === 'owner') {
+          const propSnap = await getDocs(query(collection(db,'properties'), where('ownerId','==',fbUser.uid)));
+          props = propSnap.docs.map(d => ({ id: d.id, ...d.data() } as Property));
+        } else {
+          const ids: string[] = ud.propertyIds || [];
+          for (let i = 0; i < ids.length; i += 10) {
+            const chunk = ids.slice(i, i + 10);
+            const propSnap = await getDocs(query(collection(db,'properties'), where('__name__','in',chunk)));
+            propSnap.docs.forEach(d => props.push({ id: d.id, ...d.data() } as Property));
+          }
+        }
+      }
       setProperties(props);
       // Load quick stats
       if (props.length > 0) {
