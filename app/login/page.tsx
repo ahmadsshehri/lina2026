@@ -1,10 +1,10 @@
 'use client';
 import { useState } from 'react';
-import { useAuth } from '../../context/AuthContext';
+import { signInWithEmailAndPassword } from 'firebase/auth';
+import { auth } from '../lib/firebase';
 import { useRouter } from 'next/navigation';
 
 export default function LoginPage() {
-  const { login } = useAuth();
   const router    = useRouter();
   const [email,    setEmail]    = useState('');
   const [password, setPassword] = useState('');
@@ -16,22 +16,19 @@ export default function LoginPage() {
     setError('');
     setLoading(true);
     try {
-      await login(email, password);
+      await signInWithEmailAndPassword(auth, email.trim(), password);
       router.push('/');
     } catch (err: any) {
-      console.error('Login error code:', err.code);
-      console.error('Login error message:', err.message);
-      if (err.code === 'auth/invalid-credential' ||
-          err.code === 'auth/wrong-password' ||
-          err.code === 'auth/user-not-found') {
-        setError('البريد الإلكتروني أو كلمة المرور غير صحيحة');
-      } else if (err.code === 'auth/invalid-email') {
-        setError('البريد الإلكتروني غير صحيح');
-      } else if (err.code === 'auth/too-many-requests') {
-        setError('محاولات كثيرة، انتظر قليلاً');
-      } else {
-        setError(`خطأ: ${err.code || err.message}`);
-      }
+      console.error(err.code, err.message);
+      const msgs: Record<string, string> = {
+        'auth/invalid-credential':     'البريد أو كلمة المرور غير صحيحة',
+        'auth/wrong-password':         'كلمة المرور غير صحيحة',
+        'auth/user-not-found':         'المستخدم غير موجود',
+        'auth/invalid-email':          'البريد الإلكتروني غير صحيح',
+        'auth/too-many-requests':      'محاولات كثيرة، انتظر قليلاً',
+        'auth/network-request-failed': 'مشكلة في الاتصال',
+      };
+      setError(msgs[err.code] || `خطأ: ${err.code}`);
     } finally {
       setLoading(false);
     }
@@ -45,12 +42,13 @@ export default function LoginPage() {
             <span className="text-3xl">🏢</span>
           </div>
           <h1 className="text-white text-xl font-medium">نظام إدارة العقارات</h1>
+          <p className="text-white/50 text-sm mt-1">Property Management System</p>
         </div>
 
         <div className="bg-white rounded-2xl p-8 shadow-2xl">
           <h2 className="text-gray-800 text-lg font-medium mb-6">تسجيل الدخول</h2>
-
           <form onSubmit={handleLogin} className="space-y-4">
+
             <div>
               <label className="block text-xs text-gray-500 mb-1.5">البريد الإلكتروني</label>
               <input
@@ -61,6 +59,7 @@ export default function LoginPage() {
                 placeholder="example@email.com"
                 dir="ltr"
                 required
+                autoComplete="email"
               />
             </div>
 
@@ -73,11 +72,12 @@ export default function LoginPage() {
                 className="w-full border border-gray-200 rounded-lg px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
                 placeholder="••••••••"
                 required
+                autoComplete="current-password"
               />
             </div>
 
             {error && (
-              <div className="bg-red-50 border border-red-200 rounded-lg px-4 py-3 text-sm text-red-600">
+              <div className="bg-red-50 border border-red-200 rounded-lg px-4 py-3 text-sm text-red-600 text-center">
                 {error}
               </div>
             )}
@@ -85,10 +85,16 @@ export default function LoginPage() {
             <button
               type="submit"
               disabled={loading}
-              className="w-full bg-[#1B4F72] text-white rounded-lg py-2.5 text-sm font-medium hover:bg-[#2E86C1] transition-colors disabled:opacity-60"
+              className="w-full bg-[#1B4F72] text-white rounded-lg py-2.5 text-sm font-medium hover:bg-[#2E86C1] transition-colors disabled:opacity-60 flex items-center justify-center gap-2"
             >
-              {loading ? 'جارٍ الدخول...' : 'دخول'}
+              {loading ? (
+                <>
+                  <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"/>
+                  جارٍ الدخول...
+                </>
+              ) : 'دخول'}
             </button>
+
           </form>
         </div>
       </div>
