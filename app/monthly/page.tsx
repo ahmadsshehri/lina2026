@@ -312,7 +312,7 @@ export default function MonthlyPage() {
                 {arrears.map(t => {
                   const bal = payments.filter(p => p.tenantId === t.id).reduce((s, p) => s + (p.balance || 0), 0);
                   return (
-                    <div key={t.id} style={{ background: '#fff', borderRadius: '14px', padding: '16px', border: '1px solid #fca5a5', background: '#fff9f9' }}>
+                    <div key={t.id} style={{ background: '#fff', borderRadius: '14px', padding: '16px', border: '1px solid #fca5a5',  }}>
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
                           <div style={{ background: '#dc2626', color: '#fff', borderRadius: '8px', padding: '6px 10px', fontSize: '14px', fontWeight: '700' }}>{t.unitNumber}</div>
