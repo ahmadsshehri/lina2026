@@ -45,7 +45,7 @@ export default function MonthlyPage() {
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, async (user) => {
       if (!user) { router.push('/login'); return; }
-      const snap = await getDocs(query(collection(db,'properties'), where('ownerId','==',user.uid)));
+      const snap = await getPropertiesForUserLocal(user.uid);
       const props = snap.docs.map(d => ({ id: d.id, name: (d.data() as any).name }));
       setProperties(props);
       if (props.length > 0) { setPropId(props[0].id); await loadData(props[0].id); }
