@@ -22,13 +22,15 @@ function fmtDate(ts: any) {
 }
 
 
-async function getPropertiesForUserLocal(uid: string) {
+
+
+async function loadPropertiesForUser(uid: string) {
   const userSnap = await getDoc(doc(db, 'users', uid));
   if (!userSnap.exists()) return [];
   const userData = userSnap.data() as any;
   if (userData.role === 'owner') {
     const snap = await getDocs(query(collection(db, 'properties'), where('ownerId', '==', uid)));
-    return snap.docs.map(d => ({ id: d.id, name: (d.data() as any).name }));
+    return snap.docs.map((d: any) => ({ id: d.id, name: d.data().name }));
   }
   const ids: string[] = userData.propertyIds || [];
   if (ids.length === 0) return [];
@@ -36,11 +38,10 @@ async function getPropertiesForUserLocal(uid: string) {
   for (let i = 0; i < ids.length; i += 10) {
     const chunk = ids.slice(i, i + 10);
     const snap = await getDocs(query(collection(db, 'properties'), where('__name__', 'in', chunk)));
-    snap.docs.forEach(d => results.push({ id: d.id, name: (d.data() as any).name }));
+    snap.docs.forEach((d: any) => results.push({ id: d.id, name: d.data().name }));
   }
   return results;
 }
-
 export default function ExpensesPage() {
   const router = useRouter();
   const [properties, setProperties] = useState<Property[]>([]);
@@ -55,8 +56,7 @@ export default function ExpensesPage() {
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, async (user) => {
       if (!user) { router.push('/login'); return; }
-      const snap = await getDocs(query(collection(db,'properties'), where('ownerId','==',user.uid)));
-      const props = snap.docs.map(d => ({ id: d.id, name: (d.data() as any).name }));
+      const props = await loadPropertiesForUser(user.uid);
       setProperties(props);
       if (props.length > 0) { setPropId(props[0].id); await loadExpenses(props[0].id); }
       setLoading(false);
