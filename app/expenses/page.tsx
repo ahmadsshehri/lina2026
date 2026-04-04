@@ -1,410 +1,227 @@
-// app/expenses/page.tsx — المصاريف
 'use client';
-import { useEffect, useState, useRef } from 'react';
-import { useForm } from 'react-hook-form';
-import { useStore } from '../../store/useStore';
-import { getExpenses, createExpense, deleteExpense, getMeters, createMeter } from '../../lib/db';
-import { Timestamp } from 'firebase/firestore';
-import { useAuth } from '../../context/AuthContext';
-import toast from 'react-hot-toast';
-import { exportExpensesPDF } from '../../lib/export';
-import type { Expense, ElectricMeter } from '../../types';
+import { useEffect, useState } from 'react';
+import { onAuthStateChanged } from 'firebase/auth';
+import { auth, db } from '../../lib/firebase';
+import { collection, getDocs, addDoc, deleteDoc, doc, query, where, serverTimestamp, Timestamp } from 'firebase/firestore';
+import { useRouter } from 'next/navigation';
 
-const CAT_LABEL: Record<string, string> = {
-  electricity:'كهرباء', water:'مياه', maintenance:'صيانة',
-  salary:'راتب', cleaning:'نظافة', other:'أخرى',
-};
-const CAT_COLOR: Record<string, string> = {
-  electricity:'bg-orange-50 text-orange-600',
-  water:       'bg-blue-50 text-blue-600',
-  maintenance: 'bg-purple-50 text-purple-600',
-  salary:      'bg-indigo-50 text-indigo-600',
-  cleaning:    'bg-green-50 text-green-600',
-  other:       'bg-gray-50 text-gray-600',
+interface Property { id: string; name: string; }
+interface Expense { id: string; category: string; subcategory: string; amount: number; date: any; paidBy: string; paymentMethod: string; notes: string; }
+
+const CAT: Record<string,string> = { electricity:'كهرباء', water:'مياه', maintenance:'صيانة', salary:'راتب', cleaning:'نظافة', other:'أخرى' };
+const CAT_COLOR: Record<string,{bg:string,text:string}> = {
+  electricity:{bg:'#fef3c7',text:'#92400e'}, water:{bg:'#dbeafe',text:'#1e40af'},
+  maintenance:{bg:'#ede9fe',text:'#5b21b6'}, salary:{bg:'#e0e7ff',text:'#3730a3'},
+  cleaning:{bg:'#d1fae5',text:'#065f46'}, other:{bg:'#f3f4f6',text:'#374151'},
 };
 
-export default function ExpensesPage() {
-  const { activeProperty, activeMonth, setActivePage } = useStore();
-  const { appUser } = useAuth();
-  const [expenses,  setExpenses]  = useState<Expense[]>([]);
-  const [meters,    setMeters]    = useState<ElectricMeter[]>([]);
-  const [loading,   setLoading]   = useState(true);
-  const [showModal, setShowModal] = useState(false);
-  const [tab,       setTab]       = useState<'list'|'summary'|'meters'>('list');
-  const [catFilter, setCatFilter] = useState('all');
-
-  const load = async () => {
-    if (!activeProperty) return;
-    setLoading(true);
-    const [e, m] = await Promise.all([
-      getExpenses(activeProperty.id, activeMonth),
-      getMeters(activeProperty.id),
-    ]);
-    setExpenses(e);
-    setMeters(m);
-    setLoading(false);
-  };
-
-  useEffect(() => { setActivePage('expenses'); load(); }, [activeProperty, activeMonth]);
-
-  // احصائيات
-  const total       = expenses.reduce((s, e) => s + e.amount, 0);
-  const byCategory  = expenses.reduce((acc: Record<string, number>, e) => {
-    acc[e.category] = (acc[e.category] || 0) + e.amount;
-    return acc;
-  }, {});
-  const byPaidBy    = { owner: 0, manager: 0 };
-  expenses.forEach(e => { byPaidBy[e.paidBy] += e.amount; });
-
-  const filtered = catFilter === 'all' ? expenses : expenses.filter(e => e.category === catFilter);
-
-  const handleDelete = async (id: string) => {
-    if (!confirm('هل أنت متأكد من الحذف؟')) return;
-    await deleteExpense(id);
-    toast.success('تم الحذف');
-    load();
-  };
-
-  if (!activeProperty) return <NoProperty />;
-
-  return (
-    <div className="p-5" dir="rtl">
-      {/* Header */}
-      <div className="flex items-center justify-between mb-5">
-        <div>
-          <h1 className="text-lg font-medium text-gray-800">المصاريف</h1>
-          <p className="text-sm text-gray-400">{activeMonth} — {expenses.length} سجل</p>
-        </div>
-        <div className="flex gap-2">
-          <button
-            onClick={() => exportExpensesPDF(expenses, activeProperty.name, activeMonth)}
-            className="text-xs border border-gray-200 rounded-lg px-3 py-1.5 hover:bg-gray-50"
-          >⬇ PDF</button>
-          <button
-            onClick={() => setShowModal(true)}
-            className="bg-[#1B4F72] text-white text-sm rounded-lg px-4 py-1.5 hover:bg-[#2E86C1] transition-colors"
-          >+ مصروف جديد</button>
-        </div>
-      </div>
-
-      {/* KPIs */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-5">
-        <div className="bg-white rounded-xl border border-gray-100 p-4 border-t-2 border-t-red-400">
-          <div className="text-xs text-gray-400">إجمالي المصاريف</div>
-          <div className="text-xl font-medium text-gray-800 mt-1">{total.toLocaleString('ar-SA')} ر.س</div>
-        </div>
-        <div className="bg-white rounded-xl border border-gray-100 p-4 border-t-2 border-t-orange-400">
-          <div className="text-xs text-gray-400">الكهرباء</div>
-          <div className="text-xl font-medium text-orange-600 mt-1">{(byCategory.electricity||0).toLocaleString('ar-SA')} ر.س</div>
-          <div className="text-xs text-gray-400">{total > 0 ? Math.round((byCategory.electricity||0)/total*100) : 0}% من الإجمالي</div>
-        </div>
-        <div className="bg-white rounded-xl border border-gray-100 p-4 border-t-2 border-t-indigo-400">
-          <div className="text-xs text-gray-400">الرواتب</div>
-          <div className="text-xl font-medium text-indigo-600 mt-1">{(byCategory.salary||0).toLocaleString('ar-SA')} ر.س</div>
-        </div>
-        <div className="bg-white rounded-xl border border-gray-100 p-4 border-t-2 border-t-gray-400">
-          <div className="text-xs text-gray-400 mb-1">مصاريف بالبنك / باليد</div>
-          <div className="text-sm font-medium text-gray-700">
-            {byPaidBy.manager.toLocaleString('ar-SA')} / {byPaidBy.owner.toLocaleString('ar-SA')} ر.س
-          </div>
-          <div className="text-xs text-gray-400">مسؤول / مالك</div>
-        </div>
-      </div>
-
-      {/* Tabs */}
-      <div className="flex border-b border-gray-200 mb-4 gap-1">
-        {[{id:'list',label:'قائمة المصاريف'},{id:'summary',label:'الملخص التفصيلي'},{id:'meters',label:'عدادات الكهرباء'}].map(t => (
-          <button key={t.id} onClick={() => setTab(t.id as any)}
-            className={`px-4 py-2 text-sm border-b-2 -mb-px transition-all
-              ${tab===t.id ? 'text-[#1B4F72] border-[#1B4F72] font-medium' : 'text-gray-400 border-transparent hover:text-gray-600'}`}>
-            {t.label}
-          </button>
-        ))}
-      </div>
-
-      {loading ? <PageLoader /> : (
-        <>
-          {/* ─── LIST ─── */}
-          {tab === 'list' && (
-            <div>
-              <div className="flex gap-2 mb-3 flex-wrap">
-                <select value={catFilter} onChange={e=>setCatFilter(e.target.value)}
-                  className="text-xs border border-gray-200 rounded-lg px-3 py-1.5 bg-white focus:outline-none">
-                  <option value="all">جميع الفئات</option>
-                  {Object.entries(CAT_LABEL).map(([k,v]) => <option key={k} value={k}>{v}</option>)}
-                </select>
-              </div>
-              <div className="bg-white rounded-xl border border-gray-100 overflow-hidden">
-                <table className="w-full text-sm">
-                  <thead className="bg-gray-50">
-                    <tr>
-                      {['التاريخ','الفئة','البيان','المبلغ','دُفع بواسطة','طريقة الدفع','إيصال',''].map(h => (
-                        <th key={h} className="px-3 py-2.5 text-right text-xs text-gray-500 font-medium whitespace-nowrap">{h}</th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {filtered.length === 0 && (
-                      <tr><td colSpan={8} className="px-4 py-8 text-center text-gray-300">لا توجد مصاريف لهذه الفترة</td></tr>
-                    )}
-                    {filtered.map(e => (
-                      <tr key={e.id} className="border-t border-gray-50 hover:bg-gray-50/50">
-                        <td className="px-3 py-2.5 text-xs text-gray-500">{fmtTs(e.date)}</td>
-                        <td className="px-3 py-2.5">
-                          <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${CAT_COLOR[e.category]}`}>
-                            {CAT_LABEL[e.category]}
-                          </span>
-                        </td>
-                        <td className="px-3 py-2.5 text-gray-700">{e.subcategory}</td>
-                        <td className="px-3 py-2.5 font-medium text-red-600">{e.amount.toLocaleString('ar-SA')} ر.س</td>
-                        <td className="px-3 py-2.5">
-                          <span className={`text-xs px-2 py-0.5 rounded-full ${e.paidBy==='owner' ? 'bg-yellow-50 text-yellow-600' : 'bg-blue-50 text-blue-600'}`}>
-                            {e.paidBy === 'owner' ? 'المالك' : 'المسؤول'}
-                          </span>
-                        </td>
-                        <td className="px-3 py-2.5 text-xs text-gray-500">
-                          {e.paymentMethod === 'transfer' ? 'تحويل' : e.paymentMethod === 'cash' ? 'كاش' : e.paymentMethod}
-                        </td>
-                        <td className="px-3 py-2.5">
-                          {e.receiptUrl
-                            ? <a href={e.receiptUrl} target="_blank" rel="noreferrer" className="text-xs text-blue-500 hover:underline">عرض</a>
-                            : <span className="text-gray-300 text-xs">—</span>}
-                        </td>
-                        <td className="px-3 py-2.5">
-                          {appUser?.role === 'owner' && (
-                            <button onClick={() => handleDelete(e.id)} className="text-xs text-red-400 hover:text-red-600">حذف</button>
-                          )}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                  {filtered.length > 0 && (
-                    <tfoot className="bg-gray-50 border-t-2 border-gray-200">
-                      <tr>
-                        <td colSpan={3} className="px-3 py-2.5 text-xs font-medium text-gray-500">الإجمالي</td>
-                        <td className="px-3 py-2.5 font-medium text-red-600">
-                          {filtered.reduce((s,e)=>s+e.amount,0).toLocaleString('ar-SA')} ر.س
-                        </td>
-                        <td colSpan={4}/>
-                      </tr>
-                    </tfoot>
-                  )}
-                </table>
-              </div>
-            </div>
-          )}
-
-          {/* ─── SUMMARY ─── */}
-          {tab === 'summary' && (
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-              <div className="bg-white rounded-xl border border-gray-100 p-4">
-                <div className="text-sm font-medium text-gray-700 mb-4">توزيع المصاريف حسب الفئة</div>
-                {Object.entries(byCategory).sort(([,a],[,b]) => b-a).map(([cat, amt]) => (
-                  <div key={cat} className="mb-3">
-                    <div className="flex justify-between text-xs mb-1">
-                      <span className={`px-2 py-0.5 rounded-full ${CAT_COLOR[cat]}`}>{CAT_LABEL[cat]}</span>
-                      <span className="text-gray-700 font-medium">{amt.toLocaleString('ar-SA')} ر.س ({total > 0 ? Math.round(amt/total*100) : 0}%)</span>
-                    </div>
-                    <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
-                      <div className="h-full rounded-full bg-[#1B4F72] transition-all" style={{ width: `${total>0?amt/total*100:0}%` }}/>
-                    </div>
-                  </div>
-                ))}
-              </div>
-              <div className="bg-white rounded-xl border border-gray-100 p-4">
-                <div className="text-sm font-medium text-gray-700 mb-4">مصاريف بالبنك مقابل باليد</div>
-                <div className="space-y-3">
-                  <div className="flex items-center justify-between p-3 bg-blue-50 rounded-lg">
-                    <div>
-                      <div className="text-sm font-medium text-blue-700">مسؤول العقار</div>
-                      <div className="text-xs text-blue-500">مصاريف تحويل / كاش</div>
-                    </div>
-                    <div className="text-lg font-medium text-blue-700">{byPaidBy.manager.toLocaleString('ar-SA')} ر.س</div>
-                  </div>
-                  <div className="flex items-center justify-between p-3 bg-yellow-50 rounded-lg">
-                    <div>
-                      <div className="text-sm font-medium text-yellow-700">المالك مباشرة</div>
-                      <div className="text-xs text-yellow-500">دُفع من المالك</div>
-                    </div>
-                    <div className="text-lg font-medium text-yellow-700">{byPaidBy.owner.toLocaleString('ar-SA')} ر.س</div>
-                  </div>
-                  <div className="flex items-center justify-between p-3 bg-gray-50 rounded-lg border-t-2 border-gray-200">
-                    <div className="text-sm font-medium text-gray-700">الإجمالي</div>
-                    <div className="text-lg font-medium text-gray-800">{total.toLocaleString('ar-SA')} ر.س</div>
-                  </div>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* ─── METERS ─── */}
-          {tab === 'meters' && (
-            <div>
-              <div className="flex justify-between items-center mb-3">
-                <div className="text-sm text-gray-500">عدادات كهرباء العمارة</div>
-                <button onClick={() => {/* open meter modal */}}
-                  className="text-xs border border-gray-200 rounded-lg px-3 py-1.5 hover:bg-gray-50">
-                  + عداد جديد
-                </button>
-              </div>
-              {meters.length === 0 ? (
-                <div className="bg-white rounded-xl border border-gray-100 p-8 text-center text-gray-300 text-sm">
-                  لا توجد عدادات مسجلة — أضف عداداً لتتبع استهلاك الكهرباء
-                </div>
-              ) : (
-                <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-                  {meters.map(meter => (
-                    <div key={meter.id} className="bg-white rounded-xl border border-gray-100 p-4">
-                      <div className="flex items-start justify-between mb-3">
-                        <div>
-                          <div className="text-sm font-medium text-gray-800">{meter.meterLabel}</div>
-                          <div className="text-xs text-gray-400">رقم: {meter.meterNumber}</div>
-                        </div>
-                        <div className="text-xs bg-orange-50 text-orange-600 px-2 py-1 rounded-lg">
-                          {meter.linkedUnits.length} شقة
-                        </div>
-                      </div>
-                      <div className="text-xs text-gray-500 mb-3">
-                        الشقق المربوطة: {meter.linkedUnits.join('، ')}
-                      </div>
-                      <button className="text-xs bg-[#1B4F72] text-white px-3 py-1.5 rounded-lg hover:bg-[#2E86C1]">
-                        + تسجيل قراءة {activeMonth}
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
-        </>
-      )}
-
-      {showModal && (
-        <ExpenseModal
-          propertyId={activeProperty.id}
-          recordedBy={appUser?.uid || ''}
-          onClose={() => setShowModal(false)}
-          onSaved={load}
-        />
-      )}
-    </div>
-  );
-}
-
-// ─── Expense Modal ────────────────────────────────────────────────────────────
-function ExpenseModal({ propertyId, recordedBy, onClose, onSaved }: {
-  propertyId: string; recordedBy: string; onClose: () => void; onSaved: () => void;
-}) {
-  const { register, handleSubmit } = useForm<any>({
-    defaultValues: { paidBy: 'manager', paymentMethod: 'transfer', date: new Date().toISOString().split('T')[0] }
-  });
-  const [saving,  setSaving]  = useState(false);
-  const [receipt, setReceipt] = useState<File | undefined>();
-
-  const onSubmit = async (data: any) => {
-    setSaving(true);
-    try {
-      await createExpense({
-        propertyId,
-        recordedBy,
-        category:      data.category,
-        subcategory:   data.subcategory,
-        amount:        Number(data.amount),
-        date:          Timestamp.fromDate(new Date(data.date)),
-        paidBy:        data.paidBy,
-        paymentMethod: data.paymentMethod,
-        notes:         data.notes,
-      }, receipt);
-      toast.success('تم تسجيل المصروف');
-      onSaved(); onClose();
-    } catch { toast.error('حدث خطأ'); }
-    finally { setSaving(false); }
-  };
-
-  return (
-    <Modal title="تسجيل مصروف جديد" onClose={onClose}>
-      <form onSubmit={handleSubmit(onSubmit)} className="space-y-3">
-        <div className="grid grid-cols-2 gap-3">
-          <div>
-            <label className="block text-xs text-gray-500 mb-1">الفئة</label>
-            <select {...register('category', {required:true})} className={inputCls}>
-              {Object.entries(CAT_LABEL).map(([k,v]) => <option key={k} value={k}>{v}</option>)}
-            </select>
-          </div>
-          <div>
-            <label className="block text-xs text-gray-500 mb-1">التاريخ</label>
-            <input {...register('date', {required:true})} type="date" className={inputCls}/>
-          </div>
-          <div className="col-span-2">
-            <label className="block text-xs text-gray-500 mb-1">البيان (التفاصيل)</label>
-            <input {...register('subcategory', {required:true})} className={inputCls} placeholder="مثال: فاتورة كهرباء شهر مارس"/>
-          </div>
-          <div>
-            <label className="block text-xs text-gray-500 mb-1">المبلغ (ر.س)</label>
-            <input {...register('amount', {required:true})} type="number" step="0.01" className={inputCls}/>
-          </div>
-          <div>
-            <label className="block text-xs text-gray-500 mb-1">دُفع بواسطة</label>
-            <select {...register('paidBy')} className={inputCls}>
-              <option value="manager">مسؤول العقار</option>
-              <option value="owner">المالك</option>
-            </select>
-          </div>
-          <div>
-            <label className="block text-xs text-gray-500 mb-1">طريقة الدفع</label>
-            <select {...register('paymentMethod')} className={inputCls}>
-              <option value="transfer">تحويل بنكي</option>
-              <option value="cash">كاش</option>
-            </select>
-          </div>
-          <div>
-            <label className="block text-xs text-gray-500 mb-1">صورة الإيصال</label>
-            <input
-              type="file" accept="image/*,application/pdf"
-              onChange={e => setReceipt(e.target.files?.[0])}
-              className="w-full text-xs text-gray-500 file:mr-2 file:py-1 file:px-3 file:rounded file:border-0 file:text-xs file:bg-gray-100 file:text-gray-600 hover:file:bg-gray-200"
-            />
-          </div>
-          <div className="col-span-2">
-            <label className="block text-xs text-gray-500 mb-1">ملاحظات</label>
-            <textarea {...register('notes')} className={inputCls} rows={2}/>
-          </div>
-        </div>
-        <div className="flex gap-2 pt-1">
-          <button type="submit" disabled={saving} className={btnPrimary}>
-            {saving ? 'جارٍ الحفظ...' : 'حفظ المصروف'}
-          </button>
-          <button type="button" onClick={onClose} className={btnSecondary}>إلغاء</button>
-        </div>
-      </form>
-    </Modal>
-  );
-}
-
-function Modal({ title, onClose, children }: any) {
-  return (
-    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4" dir="rtl">
-      <div className="bg-white rounded-2xl w-full max-w-lg max-h-[90vh] overflow-y-auto shadow-2xl">
-        <div className="flex items-center justify-between p-5 border-b border-gray-100">
-          <h2 className="text-sm font-medium text-gray-800">{title}</h2>
-          <button onClick={onClose} className="text-gray-400 hover:text-gray-600 text-xl">✕</button>
-        </div>
-        <div className="p-5">{children}</div>
-      </div>
-    </div>
-  );
-}
-function fmtTs(ts: any) {
+function fmtDate(ts: any) {
   if (!ts) return '—';
   const d = ts?.toDate ? ts.toDate() : new Date(ts);
   return `${d.getDate().toString().padStart(2,'0')}/${(d.getMonth()+1).toString().padStart(2,'0')}/${d.getFullYear()}`;
 }
-const inputCls     = 'w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400';
-const btnPrimary   = 'bg-[#1B4F72] text-white text-sm rounded-lg px-5 py-2 hover:bg-[#2E86C1] transition-colors disabled:opacity-60';
-const btnSecondary = 'border border-gray-200 text-gray-600 text-sm rounded-lg px-5 py-2 hover:bg-gray-50';
-function PageLoader() {
-  return <div className="flex justify-center py-12"><div className="w-7 h-7 border-4 border-blue-500 border-t-transparent rounded-full animate-spin"/></div>;
+
+export default function ExpensesPage() {
+  const router = useRouter();
+  const [properties, setProperties] = useState<Property[]>([]);
+  const [propId, setPropId] = useState('');
+  const [expenses, setExpenses] = useState<Expense[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [showModal, setShowModal] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [catFilter, setCatFilter] = useState('all');
+  const [form, setForm] = useState({ category:'electricity', subcategory:'', amount:'', date:'', paidBy:'manager', paymentMethod:'transfer', notes:'' });
+
+  useEffect(() => {
+    const unsub = onAuthStateChanged(auth, async (user) => {
+      if (!user) { router.push('/login'); return; }
+      const snap = await getDocs(query(collection(db,'properties'), where('ownerId','==',user.uid)));
+      const props = snap.docs.map(d => ({ id: d.id, name: (d.data() as any).name }));
+      setProperties(props);
+      if (props.length > 0) { setPropId(props[0].id); await loadExpenses(props[0].id); }
+      setLoading(false);
+    });
+    return unsub;
+  }, []);
+
+  const loadExpenses = async (pid: string) => {
+    const snap = await getDocs(query(collection(db,'expenses'), where('propertyId','==',pid)));
+    setExpenses(snap.docs.map(d => ({ id: d.id, ...d.data() } as Expense)).sort((a,b) => (b.date?.seconds||0) - (a.date?.seconds||0)));
+  };
+
+  const saveExpense = async () => {
+    if (!form.amount || !form.subcategory || !propId) return;
+    setSaving(true);
+    try {
+      await addDoc(collection(db,'expenses'), {
+        ...form, propertyId: propId, amount: Number(form.amount),
+        date: form.date ? Timestamp.fromDate(new Date(form.date)) : Timestamp.now(),
+        recordedBy: auth.currentUser?.uid, createdAt: serverTimestamp(),
+      });
+      await loadExpenses(propId); setShowModal(false);
+      setForm({ category:'electricity', subcategory:'', amount:'', date:'', paidBy:'manager', paymentMethod:'transfer', notes:'' });
+    } catch(e) { alert('حدث خطأ'); }
+    setSaving(false);
+  };
+
+  const deleteExpense = async (id: string) => {
+    if (!confirm('هل أنت متأكد؟')) return;
+    await deleteDoc(doc(db,'expenses',id));
+    await loadExpenses(propId);
+  };
+
+  const filtered = catFilter === 'all' ? expenses : expenses.filter(e => e.category === catFilter);
+  const total = filtered.reduce((s,e) => s + (e.amount||0), 0);
+  const byCategory = expenses.reduce((acc: Record<string,number>, e) => { acc[e.category] = (acc[e.category]||0) + e.amount; return acc; }, {});
+  const byPaidBy = { manager: expenses.filter(e=>e.paidBy==='manager').reduce((s,e)=>s+e.amount,0), owner: expenses.filter(e=>e.paidBy==='owner').reduce((s,e)=>s+e.amount,0) };
+
+  if (loading) return <div style={{display:'flex',justifyContent:'center',alignItems:'center',height:'100vh'}}><p>جارٍ التحميل...</p></div>;
+
+  return (
+    <div dir="rtl" style={{padding:'20px',fontFamily:'sans-serif',background:'#f9fafb',minHeight:'100vh'}}>
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'16px'}}>
+        <div style={{display:'flex',alignItems:'center',gap:'12px'}}>
+          <a href="/" style={{color:'#1B4F72',textDecoration:'none',fontSize:'13px'}}>← الرئيسية</a>
+          <h1 style={{margin:0,fontSize:'18px',color:'#1B4F72'}}>المصاريف</h1>
+        </div>
+        <div style={{display:'flex',gap:'8px',alignItems:'center'}}>
+          {properties.length > 1 && (
+            <select value={propId} onChange={e=>{setPropId(e.target.value);loadExpenses(e.target.value);}} style={selectStyle}>
+              {properties.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}
+            </select>
+          )}
+          <button onClick={()=>setShowModal(true)} style={btnPrimary}>+ مصروف جديد</button>
+        </div>
+      </div>
+
+      {/* KPIs */}
+      <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:'12px',marginBottom:'16px'}}>
+        {[['إجمالي المصاريف',total.toLocaleString('ar-SA')+' ر.س','#dc2626'],['الكهرباء',(byCategory.electricity||0).toLocaleString('ar-SA')+' ر.س','#d97706'],['مسؤول العقار',byPaidBy.manager.toLocaleString('ar-SA')+' ر.س','#1B4F72'],['المالك',byPaidBy.owner.toLocaleString('ar-SA')+' ر.س','#7c3aed']].map(([l,v,c])=>(
+          <div key={String(l)} style={{background:'#fff',borderRadius:'12px',padding:'16px',border:'1px solid #e5e7eb'}}>
+            <div style={{fontSize:'11px',color:'#6b7280',marginBottom:'6px'}}>{l}</div>
+            <div style={{fontSize:'18px',fontWeight:'600',color:String(c)}}>{v}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* Category bars */}
+      <div style={{background:'#fff',borderRadius:'12px',border:'1px solid #e5e7eb',padding:'16px',marginBottom:'16px'}}>
+        <div style={{fontSize:'13px',fontWeight:'500',color:'#374151',marginBottom:'12px'}}>توزيع المصاريف حسب الفئة</div>
+        {Object.entries(byCategory).sort(([,a],[,b])=>b-a).map(([cat,amt])=>{
+          const pct = total > 0 ? Math.round(amt/total*100) : 0;
+          const cc = CAT_COLOR[cat] || {bg:'#f3f4f6',text:'#374151'};
+          return (
+            <div key={cat} style={{marginBottom:'10px'}}>
+              <div style={{display:'flex',justifyContent:'space-between',fontSize:'12px',marginBottom:'4px'}}>
+                <span style={{background:cc.bg,color:cc.text,padding:'2px 8px',borderRadius:'10px'}}>{CAT[cat]||cat}</span>
+                <span style={{color:'#374151',fontWeight:'500'}}>{amt.toLocaleString('ar-SA')} ر.س ({pct}%)</span>
+              </div>
+              <div style={{height:'6px',background:'#f3f4f6',borderRadius:'3px',overflow:'hidden'}}>
+                <div style={{height:'100%',background:'#1B4F72',width:`${pct}%`,borderRadius:'3px'}}/>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Filter */}
+      <div style={{display:'flex',gap:'8px',marginBottom:'12px'}}>
+        <select value={catFilter} onChange={e=>setCatFilter(e.target.value)} style={selectStyle}>
+          <option value="all">جميع الفئات</option>
+          {Object.entries(CAT).map(([k,v])=><option key={k} value={k}>{v}</option>)}
+        </select>
+      </div>
+
+      {/* Table */}
+      <div style={{background:'#fff',borderRadius:'12px',border:'1px solid #e5e7eb',overflow:'hidden'}}>
+        <table style={{width:'100%',borderCollapse:'collapse',fontSize:'13px'}}>
+          <thead><tr style={{background:'#f9fafb'}}>
+            {['التاريخ','الفئة','البيان','المبلغ','دُفع بواسطة','الطريقة',''].map(h=>(
+              <th key={h} style={{padding:'10px 12px',textAlign:'right',color:'#6b7280',fontWeight:'500',borderBottom:'1px solid #e5e7eb'}}>{h}</th>
+            ))}
+          </tr></thead>
+          <tbody>
+            {filtered.length===0 && <tr><td colSpan={7} style={{padding:'40px',textAlign:'center',color:'#9ca3af'}}>لا توجد مصاريف</td></tr>}
+            {filtered.map((e,i)=>{
+              const cc = CAT_COLOR[e.category] || {bg:'#f3f4f6',text:'#374151'};
+              return (
+                <tr key={e.id} style={{borderBottom:i<filtered.length-1?'1px solid #f3f4f6':'none'}}>
+                  <td style={{padding:'10px 12px',color:'#6b7280',fontSize:'12px'}}>{fmtDate(e.date)}</td>
+                  <td style={{padding:'10px 12px'}}><span style={{background:cc.bg,color:cc.text,padding:'2px 8px',borderRadius:'10px',fontSize:'11px'}}>{CAT[e.category]||e.category}</span></td>
+                  <td style={{padding:'10px 12px'}}>{e.subcategory}</td>
+                  <td style={{padding:'10px 12px',fontWeight:'600',color:'#dc2626'}}>{e.amount?.toLocaleString('ar-SA')} ر.س</td>
+                  <td style={{padding:'10px 12px'}}><span style={{background:e.paidBy==='owner'?'#fef3c7':'#dbeafe',color:e.paidBy==='owner'?'#92400e':'#1e40af',padding:'2px 8px',borderRadius:'10px',fontSize:'11px'}}>{e.paidBy==='owner'?'المالك':'المسؤول'}</span></td>
+                  <td style={{padding:'10px 12px',color:'#6b7280',fontSize:'12px'}}>{e.paymentMethod==='transfer'?'تحويل':'كاش'}</td>
+                  <td style={{padding:'10px 12px'}}><button onClick={()=>deleteExpense(e.id)} style={{padding:'3px 8px',border:'1px solid #fca5a5',borderRadius:'6px',background:'#fff',cursor:'pointer',fontSize:'11px',color:'#dc2626'}}>حذف</button></td>
+                </tr>
+              );
+            })}
+          </tbody>
+          {filtered.length > 0 && (
+            <tfoot><tr style={{background:'#f9fafb',borderTop:'2px solid #e5e7eb'}}>
+              <td colSpan={3} style={{padding:'10px 12px',fontWeight:'500',color:'#374151'}}>الإجمالي</td>
+              <td style={{padding:'10px 12px',fontWeight:'600',color:'#dc2626'}}>{total.toLocaleString('ar-SA')} ر.س</td>
+              <td colSpan={3}/>
+            </tr></tfoot>
+          )}
+        </table>
+      </div>
+
+      {/* Modal */}
+      {showModal && (
+        <div style={{position:'fixed',inset:'0',background:'rgba(0,0,0,0.5)',display:'flex',alignItems:'center',justifyContent:'center',zIndex:1000}} onClick={()=>setShowModal(false)}>
+          <div style={{background:'#fff',borderRadius:'16px',padding:'24px',width:'480px',maxWidth:'95vw'}} onClick={e=>e.stopPropagation()}>
+            <div style={{display:'flex',justifyContent:'space-between',marginBottom:'20px'}}>
+              <h2 style={{margin:0,fontSize:'16px',color:'#1B4F72'}}>تسجيل مصروف جديد</h2>
+              <button onClick={()=>setShowModal(false)} style={{border:'none',background:'none',fontSize:'20px',cursor:'pointer',color:'#6b7280'}}>✕</button>
+            </div>
+            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'12px'}}>
+              <div>
+                <label style={{display:'block',fontSize:'12px',color:'#6b7280',marginBottom:'4px'}}>الفئة</label>
+                <select value={form.category} onChange={e=>setForm(f=>({...f,category:e.target.value}))} style={{width:'100%',border:'1px solid #d1d5db',borderRadius:'8px',padding:'8px 12px',fontSize:'13px'}}>
+                  {Object.entries(CAT).map(([k,v])=><option key={k} value={k}>{v}</option>)}
+                </select>
+              </div>
+              <div>
+                <label style={{display:'block',fontSize:'12px',color:'#6b7280',marginBottom:'4px'}}>التاريخ</label>
+                <input type="date" value={form.date} onChange={e=>setForm(f=>({...f,date:e.target.value}))} style={{width:'100%',border:'1px solid #d1d5db',borderRadius:'8px',padding:'8px 12px',fontSize:'13px',boxSizing:'border-box'}}/>
+              </div>
+              <div style={{gridColumn:'1 / -1'}}>
+                <label style={{display:'block',fontSize:'12px',color:'#6b7280',marginBottom:'4px'}}>البيان (التفاصيل)</label>
+                <input value={form.subcategory} placeholder="مثال: فاتورة كهرباء مارس" onChange={e=>setForm(f=>({...f,subcategory:e.target.value}))} style={{width:'100%',border:'1px solid #d1d5db',borderRadius:'8px',padding:'8px 12px',fontSize:'13px',boxSizing:'border-box'}}/>
+              </div>
+              <div>
+                <label style={{display:'block',fontSize:'12px',color:'#6b7280',marginBottom:'4px'}}>المبلغ (ر.س)</label>
+                <input type="number" value={form.amount} onChange={e=>setForm(f=>({...f,amount:e.target.value}))} style={{width:'100%',border:'1px solid #d1d5db',borderRadius:'8px',padding:'8px 12px',fontSize:'13px',boxSizing:'border-box'}}/>
+              </div>
+              <div>
+                <label style={{display:'block',fontSize:'12px',color:'#6b7280',marginBottom:'4px'}}>دُفع بواسطة</label>
+                <select value={form.paidBy} onChange={e=>setForm(f=>({...f,paidBy:e.target.value}))} style={{width:'100%',border:'1px solid #d1d5db',borderRadius:'8px',padding:'8px 12px',fontSize:'13px'}}>
+                  <option value="manager">مسؤول العقار</option><option value="owner">المالك</option>
+                </select>
+              </div>
+              <div>
+                <label style={{display:'block',fontSize:'12px',color:'#6b7280',marginBottom:'4px'}}>طريقة الدفع</label>
+                <select value={form.paymentMethod} onChange={e=>setForm(f=>({...f,paymentMethod:e.target.value}))} style={{width:'100%',border:'1px solid #d1d5db',borderRadius:'8px',padding:'8px 12px',fontSize:'13px'}}>
+                  <option value="transfer">تحويل بنكي</option><option value="cash">كاش</option>
+                </select>
+              </div>
+              <div>
+                <label style={{display:'block',fontSize:'12px',color:'#6b7280',marginBottom:'4px'}}>ملاحظات</label>
+                <input value={form.notes} onChange={e=>setForm(f=>({...f,notes:e.target.value}))} style={{width:'100%',border:'1px solid #d1d5db',borderRadius:'8px',padding:'8px 12px',fontSize:'13px',boxSizing:'border-box'}}/>
+              </div>
+            </div>
+            <div style={{display:'flex',gap:'8px',marginTop:'20px'}}>
+              <button onClick={saveExpense} disabled={saving} style={btnPrimary}>{saving?'جارٍ الحفظ...':'حفظ المصروف'}</button>
+              <button onClick={()=>setShowModal(false)} style={btnOutline}>إلغاء</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
 }
-function NoProperty() {
-  return <div className="flex items-center justify-center h-64 text-gray-400 text-sm">يرجى اختيار عقار أولاً</div>;
-}
+
+const btnPrimary: React.CSSProperties = {padding:'8px 18px',background:'#1B4F72',color:'#fff',border:'none',borderRadius:'8px',cursor:'pointer',fontSize:'13px',fontFamily:'sans-serif'};
+const btnOutline: React.CSSProperties = {padding:'8px 18px',background:'#fff',color:'#374151',border:'1px solid #d1d5db',borderRadius:'8px',cursor:'pointer',fontSize:'13px',fontFamily:'sans-serif'};
+const selectStyle: React.CSSProperties = {border:'1px solid #d1d5db',borderRadius:'8px',padding:'7px 12px',fontSize:'13px',background:'#fff'};
