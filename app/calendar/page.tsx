@@ -22,24 +22,6 @@ const CH_LABEL: Record<string, string> = {
   direct: 'مباشر', other: 'أخرى',
 };
 
-async function getPropertiesForUser(uid: string) {
-  const userSnap = await getDoc(doc(db, 'users', uid));
-  if (!userSnap.exists()) return [];
-  const userData = userSnap.data() as any;
-  if (userData.role === 'owner') {
-    const snap = await getDocs(query(collection(db, 'properties'), where('ownerId', '==', uid)));
-    return snap.docs.map(d => ({ id: d.id, name: (d.data() as any).name }));
-  }
-  const ids: string[] = userData.propertyIds || [];
-  if (ids.length === 0) return [];
-  const results: any[] = [];
-  for (let i = 0; i < ids.length; i += 10) {
-    const chunk = ids.slice(i, i + 10);
-    const snap = await getDocs(query(collection(db, 'properties'), where('__name__', 'in', chunk)));
-    snap.docs.forEach(d => results.push({ id: d.id, name: (d.data() as any).name }));
-  }
-  return results;
-}
 
 function fmtDate(ts: any) {
   if (!ts) return '—';
@@ -47,6 +29,25 @@ function fmtDate(ts: any) {
   return `${d.getDate().toString().padStart(2, '0')}/${(d.getMonth() + 1).toString().padStart(2, '0')}`;
 }
 
+
+async function loadPropertiesForUser(uid: string) {
+  const userSnap = await getDoc(doc(db, 'users', uid));
+  if (!userSnap.exists()) return [];
+  const userData = userSnap.data() as any;
+  if (userData.role === 'owner') {
+    const snap = await getDocs(query(collection(db, 'properties'), where('ownerId', '==', uid)));
+    return snap.docs.map((d: any) => ({ id: d.id, name: d.data().name }));
+  }
+  const ids: string[] = userData.propertyIds || [];
+  if (ids.length === 0) return [];
+  const results: any[] = [];
+  for (let i = 0; i < ids.length; i += 10) {
+    const chunk = ids.slice(i, i + 10);
+    const snap = await getDocs(query(collection(db, 'properties'), where('__name__', 'in', chunk)));
+    snap.docs.forEach((d: any) => results.push({ id: d.id, name: d.data().name }));
+  }
+  return results;
+}
 export default function CalendarPage() {
   const router = useRouter();
   const [properties, setProperties] = useState<Property[]>([]);
@@ -63,7 +64,7 @@ export default function CalendarPage() {
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, async (user) => {
       if (!user) { router.push('/login'); return; }
-      const props = await getPropertiesForUser(user.uid);
+      const props = await loadPropertiesForUser(user.uid);
       setProperties(props);
       if (props.length > 0) {
         setPropId(props[0].id);
