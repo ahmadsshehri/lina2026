@@ -1,456 +1,391 @@
-// app/furnished/page.tsx — الشقق المفروشة
 'use client';
 import { useEffect, useState } from 'react';
-import { useForm } from 'react-hook-form';
-import { useStore } from '../../store/useStore';
-import {
-  getBookings, createBooking, updateBooking, updateDepositStatus,
-  getUnits, calcOccupancy,
-} from '../../lib/db';
-import { Timestamp } from 'firebase/firestore';
-import toast from 'react-hot-toast';
-import { exportBookingsPDF } from '../../lib/export';
-import type { Booking, Unit } from '../../types';
+import { onAuthStateChanged } from 'firebase/auth';
+import { auth, db } from '../../lib/firebase';
+import { collection, getDocs, addDoc, updateDoc, doc, query, where, serverTimestamp, Timestamp } from 'firebase/firestore';
+import { useRouter } from 'next/navigation';
 
-const CHANNEL_COLORS: Record<string, string> = {
-  airbnb:  { bg: 'bg-red-50',    text: 'text-red-600',    dot: '#E74C3C' },
-  gathern: { bg: 'bg-green-50',  text: 'text-green-700',  dot: '#27AE60' },
-  booking: { bg: 'bg-blue-50',   text: 'text-blue-700',   dot: '#2E86C1' },
-  direct:  { bg: 'bg-yellow-50', text: 'text-yellow-700', dot: '#D4AC0D' },
-  other:   { bg: 'bg-purple-50', text: 'text-purple-700', dot: '#7D3C98' },
-} as any;
+interface Property { id: string; name: string; }
+interface Unit { id: string; unitNumber: string; type: string; }
+interface Booking {
+  id: string; unitId: string; unitNumber: string; guestName: string;
+  guestPhone: string; channel: string; checkinDate: any; checkoutDate: any;
+  nights: number; totalRevenue: number; platformFee: number; netRevenue: number;
+  depositAmount: number; depositStatus: string; status: string; notes: string;
+}
 
-const channelLabel: Record<string, string> = {
-  airbnb: 'Airbnb', gathern: 'Gathern', booking: 'Booking.com',
-  direct: 'مباشر', other: 'أخرى',
+const CHANNELS: Record<string,{label:string,color:string,bg:string}> = {
+  airbnb:  { label:'Airbnb',       color:'#991b1b', bg:'#fee2e2' },
+  gathern: { label:'Gathern',      color:'#065f46', bg:'#d1fae5' },
+  booking: { label:'Booking.com',  color:'#1e40af', bg:'#dbeafe' },
+  direct:  { label:'مباشر',        color:'#92400e', bg:'#fef3c7' },
+  other:   { label:'أخرى',         color:'#374151', bg:'#f3f4f6' },
 };
-const statusLabel: Record<string, string> = {
-  confirmed: 'مؤكد', checkedin: 'وصل', checkedout: 'غادر', cancelled: 'ملغي',
+const STATUS: Record<string,{label:string,color:string,bg:string}> = {
+  confirmed:  { label:'مؤكد',  color:'#1e40af', bg:'#dbeafe' },
+  checkedin:  { label:'وصل',   color:'#065f46', bg:'#d1fae5' },
+  checkedout: { label:'غادر',  color:'#374151', bg:'#f3f4f6' },
+  cancelled:  { label:'ملغي',  color:'#991b1b', bg:'#fee2e2' },
 };
-const depositLabel: Record<string, string> = {
-  held: 'محتجز', returned: 'مُعاد', deducted: 'مخصوم',
+const DEPOSIT: Record<string,{label:string,color:string,bg:string}> = {
+  held:     { label:'محتجز', color:'#92400e', bg:'#fef3c7' },
+  returned: { label:'مُعاد',  color:'#065f46', bg:'#d1fae5' },
+  deducted: { label:'مخصوم', color:'#991b1b', bg:'#fee2e2' },
 };
+
+function fmtDate(ts: any) {
+  if (!ts) return '—';
+  const d = ts?.toDate ? ts.toDate() : new Date(ts);
+  return `${d.getDate().toString().padStart(2,'0')}/${(d.getMonth()+1).toString().padStart(2,'0')}`;
+}
 
 export default function FurnishedPage() {
-  const { activeProperty, activeMonth, setActivePage } = useStore();
-  const [bookings,      setBookings]      = useState<Booking[]>([]);
-  const [furnUnits,     setFurnUnits]     = useState<Unit[]>([]);
-  const [loading,       setLoading]       = useState(true);
-  const [showModal,     setShowModal]     = useState(false);
-  const [editBooking,   setEditBooking]   = useState<Booking | null>(null);
-  const [filterChannel, setFilterChannel] = useState('all');
-  const [filterUnit,    setFilterUnit]    = useState('all');
+  const router = useRouter();
+  const [properties, setProperties] = useState<Property[]>([]);
+  const [propId, setPropId] = useState('');
+  const [units, setUnits] = useState<Unit[]>([]);
+  const [bookings, setBookings] = useState<Booking[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [showModal, setShowModal] = useState(false);
+  const [editBooking, setEditBooking] = useState<Booking|null>(null);
+  const [saving, setSaving] = useState(false);
+  const [filterStatus, setFilterStatus] = useState('all');
+  const [form, setForm] = useState({ unitId:'', guestName:'', guestPhone:'', channel:'airbnb', checkinDate:'', checkoutDate:'', totalRevenue:'', platformFee:'0', depositAmount:'0', depositStatus:'held', status:'confirmed', notes:'' });
 
-  const load = async () => {
-    if (!activeProperty) return;
-    setLoading(true);
-    const [b, u] = await Promise.all([
-      getBookings(activeProperty.id, activeMonth),
-      getUnits(activeProperty.id),
+  useEffect(() => {
+    const unsub = onAuthStateChanged(auth, async (user) => {
+      if (!user) { router.push('/login'); return; }
+      const snap = await getDocs(query(collection(db,'properties'), where('ownerId','==',user.uid)));
+      const props = snap.docs.map(d => ({ id: d.id, name: (d.data() as any).name }));
+      setProperties(props);
+      if (props.length > 0) {
+        setPropId(props[0].id);
+        await loadData(props[0].id);
+      }
+      setLoading(false);
+    });
+    return unsub;
+  }, []);
+
+  const loadData = async (pid: string) => {
+    const [uSnap, bSnap] = await Promise.all([
+      getDocs(query(collection(db,'units'), where('propertyId','==',pid), where('type','==','furnished'))),
+      getDocs(query(collection(db,'bookings'), where('propertyId','==',pid))),
     ]);
-    setBookings(b);
-    setFurnUnits(u.filter(u => u.type === 'furnished'));
-    setLoading(false);
+    const u = uSnap.docs.map(d => ({ id: d.id, ...d.data() } as Unit));
+    setUnits(u);
+    setBookings(bSnap.docs.map(d => ({ id: d.id, ...d.data() } as Booking)).sort((a,b)=>(b.checkinDate?.seconds||0)-(a.checkinDate?.seconds||0)));
+    if (u.length > 0 && !form.unitId) setForm(f => ({ ...f, unitId: u[0].id }));
   };
 
-  useEffect(() => { setActivePage('furnished'); load(); }, [activeProperty, activeMonth]);
+  const calcNights = () => {
+    if (!form.checkinDate || !form.checkoutDate) return 0;
+    return Math.max(0, Math.ceil((new Date(form.checkoutDate).getTime() - new Date(form.checkinDate).getTime()) / 86400000));
+  };
 
-  const [y, m] = activeMonth.split('-').map(Number);
+  const saveBooking = async () => {
+    if (!form.unitId || !form.guestName || !form.checkinDate || !form.checkoutDate) return;
+    setSaving(true);
+    try {
+      const unit = units.find(u => u.id === form.unitId);
+      const nights = calcNights();
+      const totalRevenue = Number(form.totalRevenue);
+      const platformFee = Number(form.platformFee);
+      const data = {
+        ...form, propertyId: propId,
+        unitNumber: unit?.unitNumber || '',
+        nights, totalRevenue, platformFee,
+        netRevenue: totalRevenue - platformFee,
+        nightlyRate: nights > 0 ? totalRevenue / nights : 0,
+        depositAmount: Number(form.depositAmount),
+        checkinDate: Timestamp.fromDate(new Date(form.checkinDate)),
+        checkoutDate: Timestamp.fromDate(new Date(form.checkoutDate)),
+      };
+      if (editBooking) {
+        await updateDoc(doc(db,'bookings',editBooking.id), data);
+      } else {
+        await addDoc(collection(db,'bookings'), { ...data, createdAt: serverTimestamp() });
+      }
+      await loadData(propId);
+      setShowModal(false);
+      setEditBooking(null);
+    } catch(e) { alert('حدث خطأ'); }
+    setSaving(false);
+  };
 
-  const filtered = bookings.filter(b => {
-    if (filterChannel !== 'all' && b.channel !== filterChannel) return false;
-    if (filterUnit    !== 'all' && b.unitId  !== filterUnit)    return false;
-    return true;
-  });
+  const returnDeposit = async (b: Booking) => {
+    if (!confirm('تأكيد إعادة التأمين؟')) return;
+    await updateDoc(doc(db,'bookings',b.id), { depositStatus:'returned' });
+    await loadData(propId);
+  };
 
-  const activeBookings = filtered.filter(b => b.status !== 'cancelled');
-  const totalRevenue   = activeBookings.reduce((s, b) => s + b.netRevenue, 0);
-  const totalNights    = activeBookings.reduce((s, b) => s + b.nights, 0);
-  const pendingDeposit = bookings.filter(b => b.depositStatus === 'held' && b.status === 'checkedout').length;
+  const changeStatus = async (b: Booking, status: string) => {
+    await updateDoc(doc(db,'bookings',b.id), { status });
+    await loadData(propId);
+  };
 
-  // متوسط الإشغال
-  const avgOccupancy = furnUnits.length > 0
-    ? Math.round(furnUnits.reduce((s, u) => s + calcOccupancy(bookings, u.id, y, m), 0) / furnUnits.length)
-    : 0;
+  const filtered = filterStatus === 'all' ? bookings : bookings.filter(b => b.status === filterStatus);
+  const activeBookings = bookings.filter(b => b.status !== 'cancelled');
+  const totalRevenue = activeBookings.reduce((s,b) => s+b.netRevenue, 0);
+  const pendingDeposit = bookings.filter(b => b.depositStatus==='held' && b.status==='checkedout').length;
+  const nights = calcNights();
 
-  if (!activeProperty) return <NoProperty />;
+  if (loading) return (
+    <div style={{display:'flex',justifyContent:'center',alignItems:'center',height:'100vh',background:'#f9fafb'}}>
+      <div style={{textAlign:'center'}}>
+        <div style={{width:'40px',height:'40px',border:'3px solid #1B4F72',borderTopColor:'transparent',borderRadius:'50%',animation:'spin 0.8s linear infinite',margin:'0 auto 12px'}}/>
+        <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
+        <p style={{color:'#6b7280',fontFamily:'sans-serif',fontSize:'14px'}}>جارٍ التحميل...</p>
+      </div>
+    </div>
+  );
 
   return (
-    <div className="p-5" dir="rtl">
-
-      {/* Header */}
-      <div className="flex items-center justify-between mb-5">
-        <div>
-          <h1 className="text-lg font-medium text-gray-800">الشقق المفروشة</h1>
-          <p className="text-sm text-gray-400">{activeMonth} — {furnUnits.length} وحدة مفروشة</p>
+    <div dir="rtl" style={{fontFamily:'sans-serif',background:'#f9fafb',minHeight:'100vh'}}>
+      {/* Top bar */}
+      <div style={{background:'#1B4F72',padding:'16px 20px',display:'flex',alignItems:'center',gap:'12px',position:'sticky',top:0,zIndex:50}}>
+        <button onClick={()=>router.push('/')} style={{background:'rgba(255,255,255,0.15)',border:'none',borderRadius:'8px',padding:'8px',cursor:'pointer'}}>
+          <span style={{color:'#fff',fontSize:'18px'}}>←</span>
+        </button>
+        <div style={{flex:1}}>
+          <h1 style={{margin:0,fontSize:'17px',fontWeight:'600',color:'#fff'}}>الشقق المفروشة</h1>
+          <p style={{margin:0,fontSize:'12px',color:'rgba(255,255,255,0.6)'}}>{activeBookings.length} حجز نشط</p>
         </div>
-        <div className="flex gap-2">
-          <button
-            onClick={() => exportBookingsPDF(activeBookings, activeProperty.name, activeMonth)}
-            className="text-xs border border-gray-200 rounded-lg px-3 py-1.5 hover:bg-gray-50"
-          >⬇ PDF</button>
-          <button
-            onClick={() => { setEditBooking(null); setShowModal(true); }}
-            className="bg-[#1B4F72] text-white text-sm rounded-lg px-4 py-1.5 hover:bg-[#2E86C1] transition-colors"
-          >+ حجز جديد</button>
-        </div>
+        <button onClick={()=>{setEditBooking(null);setForm({unitId:units[0]?.id||'',guestName:'',guestPhone:'',channel:'airbnb',checkinDate:'',checkoutDate:'',totalRevenue:'',platformFee:'0',depositAmount:'0',depositStatus:'held',status:'confirmed',notes:''});setShowModal(true);}}
+          style={{background:'#D4AC0D',border:'none',borderRadius:'10px',padding:'10px 16px',cursor:'pointer',color:'#fff',fontSize:'13px',fontWeight:'600'}}>
+          + حجز
+        </button>
       </div>
 
-      {/* KPIs */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-5">
-        <KpiCard label="صافي الإيرادات" value={`${totalRevenue.toLocaleString('ar-SA')} ر.س`} accent="#1E8449"/>
-        <KpiCard label="متوسط الإشغال" value={`${avgOccupancy}%`} accent="#D4AC0D"
-          sub={furnUnits.map(u => `${u.unitNumber}: ${calcOccupancy(bookings, u.id, y, m)}%`).join(' | ')}/>
-        <KpiCard label="عدد الحجوزات" value={`${activeBookings.length} حجز`} accent="#2E86C1"
-          sub={`${totalNights} ليلة إجمالاً`}/>
-        <KpiCard label="تأمينات معلقة" value={`${pendingDeposit} حجز`}
-          accent={pendingDeposit > 0 ? '#E74C3C' : '#1E8449'}
-          sub={pendingDeposit > 0 ? 'تحتاج مراجعة' : 'لا شيء معلق ✓'}/>
-      </div>
+      <div style={{padding:'16px',maxWidth:'700px',margin:'0 auto'}}>
 
-      {/* Occupancy per unit */}
-      <div className="bg-white rounded-xl border border-gray-100 p-4 mb-4">
-        <div className="text-sm font-medium text-gray-700 mb-3">نسبة الإشغال لكل وحدة — {activeMonth}</div>
-        <div className="grid grid-cols-2 lg:grid-cols-3 gap-3">
-          {furnUnits.map(u => {
-            const occ = calcOccupancy(bookings, u.id, y, m);
-            return (
-              <div key={u.id} className="flex items-center gap-3">
-                <div className="text-sm font-medium text-[#1B4F72] w-16">ش {u.unitNumber}</div>
-                <div className="flex-1">
-                  <div className="flex justify-between text-xs text-gray-400 mb-1">
-                    <span></span><span>{occ}%</span>
-                  </div>
-                  <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
-                    <div
-                      className="h-full rounded-full transition-all"
-                      style={{
-                        width: `${occ}%`,
-                        background: occ >= 70 ? '#1E8449' : occ >= 50 ? '#D4AC0D' : '#E74C3C'
-                      }}
-                    />
-                  </div>
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      </div>
+        {/* Property selector */}
+        {properties.length > 1 && (
+          <div style={{marginBottom:'14px'}}>
+            <select value={propId} onChange={e=>{setPropId(e.target.value);loadData(e.target.value);}}
+              style={{width:'100%',border:'1.5px solid #e5e7eb',borderRadius:'12px',padding:'12px 16px',fontSize:'14px',background:'#fff',appearance:'none'}}>
+              {properties.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}
+            </select>
+          </div>
+        )}
 
-      {/* Filters */}
-      <div className="flex gap-2 mb-3 flex-wrap">
-        <select
-          value={filterChannel}
-          onChange={e => setFilterChannel(e.target.value)}
-          className="text-xs border border-gray-200 rounded-lg px-3 py-1.5 bg-white focus:outline-none"
-        >
-          <option value="all">جميع المنصات</option>
-          {Object.entries(channelLabel).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
-        </select>
-        <select
-          value={filterUnit}
-          onChange={e => setFilterUnit(e.target.value)}
-          className="text-xs border border-gray-200 rounded-lg px-3 py-1.5 bg-white focus:outline-none"
-        >
-          <option value="all">جميع الوحدات</option>
-          {furnUnits.map(u => <option key={u.id} value={u.id}>شقة {u.unitNumber}</option>)}
-        </select>
-        <div className="flex gap-1.5 items-center mr-auto">
-          {Object.entries(channelLabel).map(([k, v]) => (
-            <div key={k} className="flex items-center gap-1 text-xs text-gray-500">
-              <div className="w-2.5 h-2.5 rounded-full" style={{ background: (CHANNEL_COLORS[k] as any)?.dot }}/>
-              {v}
+        {/* KPI cards */}
+        <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:'10px',marginBottom:'16px'}}>
+          {[
+            ['صافي الإيرادات', totalRevenue.toLocaleString('ar-SA')+'\nر.س', '#16a34a', '#d1fae5'],
+            ['الحجوزات', activeBookings.length+'\nحجز نشط', '#1e40af', '#dbeafe'],
+            ['تأمين معلق', pendingDeposit+'\nحجز', pendingDeposit>0?'#dc2626':'#16a34a', pendingDeposit>0?'#fee2e2':'#d1fae5'],
+          ].map(([l,v,c,bg])=>(
+            <div key={String(l)} style={{background:String(bg),borderRadius:'14px',padding:'14px 12px',textAlign:'center',border:`1px solid ${String(c)}30`}}>
+              <div style={{fontSize:'12px',color:'#6b7280',marginBottom:'6px'}}>{l}</div>
+              {String(v).split('\n').map((line,i)=>(
+                <div key={i} style={{fontSize:i===0?'20px':'11px',fontWeight:i===0?'700':'400',color:i===0?String(c):'#6b7280',lineHeight:'1.2'}}>{line}</div>
+              ))}
             </div>
           ))}
         </div>
-      </div>
 
-      {/* Bookings Table */}
-      {loading ? <PageLoader /> : (
-        <div className="bg-white rounded-xl border border-gray-100 overflow-hidden">
-          <table className="w-full text-sm">
-            <thead className="bg-gray-50">
-              <tr>
-                {['الشقة','الضيف','المنصة','الوصول','المغادرة','ليالي','الإيراد','صافي','تأمين','الحالة',''].map(h => (
-                  <th key={h} className="px-3 py-2.5 text-right text-xs text-gray-500 font-medium whitespace-nowrap">{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {filtered.length === 0 && (
-                <tr><td colSpan={11} className="px-4 py-10 text-center text-gray-300">لا توجد حجوزات لهذه الفترة</td></tr>
-              )}
-              {filtered.map(b => {
-                const ch = CHANNEL_COLORS[b.channel] as any;
+        {/* Occupancy per unit */}
+        {units.length > 0 && (
+          <div style={{background:'#fff',borderRadius:'16px',border:'1px solid #e5e7eb',padding:'16px',marginBottom:'16px'}}>
+            <div style={{fontSize:'14px',fontWeight:'600',color:'#374151',marginBottom:'12px'}}>إشغال الوحدات</div>
+            <div style={{display:'flex',flexDirection:'column',gap:'10px'}}>
+              {units.map(u => {
+                const uBookings = activeBookings.filter(b => b.unitId === u.id);
+                const rev = uBookings.reduce((s,b) => s+b.netRevenue, 0);
                 return (
-                  <tr key={b.id} className={`border-t border-gray-50 hover:bg-gray-50/50 ${b.status === 'cancelled' ? 'opacity-50' : ''}`}>
-                    <td className="px-3 py-2.5 font-medium text-[#1B4F72]">{b.unitNumber}</td>
-                    <td className="px-3 py-2.5 font-medium">{b.guestName}</td>
-                    <td className="px-3 py-2.5">
-                      <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${ch?.bg} ${ch?.text}`}>
-                        {channelLabel[b.channel]}
-                      </span>
-                    </td>
-                    <td className="px-3 py-2.5 text-xs text-gray-500">{fmtTs(b.checkinDate)}</td>
-                    <td className="px-3 py-2.5 text-xs text-gray-500">{fmtTs(b.checkoutDate)}</td>
-                    <td className="px-3 py-2.5 text-center">{b.nights}</td>
-                    <td className="px-3 py-2.5">{b.totalRevenue.toLocaleString('ar-SA')}</td>
-                    <td className="px-3 py-2.5 font-medium text-green-600">{b.netRevenue.toLocaleString('ar-SA')}</td>
-                    <td className="px-3 py-2.5">
-                      {b.depositAmount > 0 ? (
-                        <button
-                          onClick={() => handleDepositClick(b)}
-                          className={`text-xs px-2 py-0.5 rounded-full font-medium cursor-pointer
-                            ${b.depositStatus === 'held'     ? 'bg-orange-50 text-orange-600 hover:bg-orange-100' :
-                              b.depositStatus === 'returned' ? 'bg-green-50 text-green-600' :
-                              'bg-red-50 text-red-600'}`}
-                        >
-                          {depositLabel[b.depositStatus]} ({b.depositAmount.toLocaleString()})
-                        </button>
-                      ) : <span className="text-gray-300 text-xs">—</span>}
-                    </td>
-                    <td className="px-3 py-2.5">
-                      <span className={`text-xs px-2 py-0.5 rounded-full
-                        ${b.status === 'confirmed'  ? 'bg-blue-50 text-blue-600' :
-                          b.status === 'checkedin'  ? 'bg-green-50 text-green-600' :
-                          b.status === 'checkedout' ? 'bg-gray-50 text-gray-500' :
-                          'bg-red-50 text-red-400'}`}>
-                        {statusLabel[b.status]}
-                      </span>
-                    </td>
-                    <td className="px-3 py-2.5">
-                      <div className="flex gap-1">
-                        <button
-                          onClick={() => { setEditBooking(b); setShowModal(true); }}
-                          className="text-xs border border-gray-200 px-2 py-1 rounded hover:bg-gray-50"
-                        >تعديل</button>
-                        {b.status === 'confirmed' && (
-                          <button
-                            onClick={() => changeStatus(b.id, 'checkedin')}
-                            className="text-xs bg-green-600 text-white px-2 py-1 rounded hover:bg-green-700"
-                          >وصل</button>
-                        )}
-                        {b.status === 'checkedin' && (
-                          <button
-                            onClick={() => changeStatus(b.id, 'checkedout')}
-                            className="text-xs bg-gray-600 text-white px-2 py-1 rounded hover:bg-gray-700"
-                          >غادر</button>
-                        )}
-                      </div>
-                    </td>
-                  </tr>
+                  <div key={u.id} style={{display:'flex',alignItems:'center',gap:'12px'}}>
+                    <div style={{background:'#1B4F72',borderRadius:'8px',padding:'6px 10px',color:'#fff',fontSize:'13px',fontWeight:'600',minWidth:'44px',textAlign:'center'}}>
+                      {u.unitNumber}
+                    </div>
+                    <div style={{flex:1,fontSize:'12px',color:'#6b7280'}}>{uBookings.length} حجز</div>
+                    <div style={{fontSize:'13px',fontWeight:'600',color:'#16a34a'}}>{rev.toLocaleString('ar-SA')} ر.س</div>
+                  </div>
                 );
               })}
-            </tbody>
-            {filtered.length > 0 && (
-              <tfoot className="bg-gray-50 border-t-2 border-gray-200">
-                <tr>
-                  <td colSpan={6} className="px-3 py-2.5 text-xs font-medium text-gray-500">الإجماليات</td>
-                  <td className="px-3 py-2.5 font-medium">{activeBookings.reduce((s,b)=>s+b.totalRevenue,0).toLocaleString('ar-SA')}</td>
-                  <td className="px-3 py-2.5 font-medium text-green-600">{totalRevenue.toLocaleString('ar-SA')}</td>
-                  <td colSpan={3}/>
-                </tr>
-              </tfoot>
-            )}
-          </table>
-        </div>
-      )}
-
-      {showModal && (
-        <BookingModal
-          booking={editBooking}
-          propertyId={activeProperty.id}
-          furnUnits={furnUnits}
-          onClose={() => { setShowModal(false); setEditBooking(null); }}
-          onSaved={load}
-        />
-      )}
-    </div>
-  );
-
-  async function changeStatus(id: string, status: Booking['status']) {
-    await updateBooking(id, { status });
-    toast.success(`تم تحديث الحالة إلى: ${statusLabel[status]}`);
-    load();
-  }
-
-  function handleDepositClick(b: Booking) {
-    if (b.depositStatus !== 'held') return;
-    if (confirm(`هل تريد تسجيل إعادة التأمين (${b.depositAmount.toLocaleString()} ر.س)؟`)) {
-      updateDepositStatus(b.id, 'returned', new Date())
-        .then(() => { toast.success('تم تسجيل إعادة التأمين'); load(); });
-    }
-  }
-}
-
-// ─── Booking Modal ────────────────────────────────────────────────────────────
-function BookingModal({ booking, propertyId, furnUnits, onClose, onSaved }: {
-  booking: Booking | null; propertyId: string; furnUnits: Unit[];
-  onClose: () => void; onSaved: () => void;
-}) {
-  const { register, handleSubmit, watch } = useForm<any>({
-    defaultValues: booking ? {
-      ...booking,
-      checkinDate:  fmtInputDate(booking.checkinDate),
-      checkoutDate: fmtInputDate(booking.checkoutDate),
-    } : { depositStatus: 'held', status: 'confirmed', platformFee: 0 }
-  });
-  const [saving, setSaving] = useState(false);
-
-  const checkin  = watch('checkinDate');
-  const checkout = watch('checkoutDate');
-  const nights   = checkin && checkout
-    ? Math.max(0, Math.ceil((new Date(checkout).getTime() - new Date(checkin).getTime()) / 86400000))
-    : 0;
-
-  const onSubmit = async (data: any) => {
-    setSaving(true);
-    try {
-      const unit = furnUnits.find(u => u.id === data.unitId);
-      const payload = {
-        ...data,
-        propertyId,
-        unitNumber:    unit?.unitNumber || data.unitId,
-        checkinDate:   Timestamp.fromDate(new Date(data.checkinDate)),
-        checkoutDate:  Timestamp.fromDate(new Date(data.checkoutDate)),
-        nights,
-        totalRevenue:  Number(data.totalRevenue),
-        platformFee:   Number(data.platformFee || 0),
-        netRevenue:    Number(data.totalRevenue) - Number(data.platformFee || 0),
-        nightlyRate:   nights > 0 ? Number(data.totalRevenue) / nights : 0,
-        depositAmount: Number(data.depositAmount || 0),
-      };
-      if (booking?.id) {
-        await updateBooking(booking.id, payload);
-        toast.success('تم تحديث الحجز');
-      } else {
-        await createBooking(payload);
-        toast.success('تم تسجيل الحجز');
-      }
-      onSaved(); onClose();
-    } catch { toast.error('حدث خطأ'); }
-    finally { setSaving(false); }
-  };
-
-  return (
-    <Modal title={booking ? 'تعديل حجز' : 'حجز جديد'} onClose={onClose}>
-      <form onSubmit={handleSubmit(onSubmit)} className="space-y-3">
-        <div className="grid grid-cols-2 gap-3">
-          <FormField label="الشقة" error="">
-            <select {...register('unitId', {required:true})} className={inputCls}>
-              {furnUnits.map(u => <option key={u.id} value={u.id}>شقة {u.unitNumber}</option>)}
-            </select>
-          </FormField>
-          <FormField label="المنصة" error="">
-            <select {...register('channel')} className={inputCls}>
-              {Object.entries(channelLabel).map(([k,v]) => <option key={k} value={k}>{v}</option>)}
-            </select>
-          </FormField>
-          <FormField label="اسم الضيف" error="">
-            <input {...register('guestName', {required:true})} className={inputCls}/>
-          </FormField>
-          <FormField label="رقم الجوال" error="">
-            <input {...register('guestPhone')} className={inputCls}/>
-          </FormField>
-          <FormField label="تاريخ الوصول" error="">
-            <input {...register('checkinDate', {required:true})} type="date" className={inputCls}/>
-          </FormField>
-          <FormField label="تاريخ المغادرة" error="">
-            <input {...register('checkoutDate', {required:true})} type="date" className={inputCls}/>
-          </FormField>
-          {nights > 0 && (
-            <div className="col-span-2 bg-blue-50 rounded-lg px-3 py-2 text-xs text-blue-700 font-medium">
-              عدد الليالي: {nights} ليلة
             </div>
-          )}
-          <FormField label="الإيراد الإجمالي (ر.س)" error="">
-            <input {...register('totalRevenue', {required:true})} type="number" className={inputCls}/>
-          </FormField>
-          <FormField label="عمولة المنصة (ر.س)" error="">
-            <input {...register('platformFee')} type="number" className={inputCls} placeholder="0"/>
-          </FormField>
-          <FormField label="مبلغ التأمين (ر.س)" error="">
-            <input {...register('depositAmount')} type="number" className={inputCls} placeholder="0"/>
-          </FormField>
-          <FormField label="حالة التأمين" error="">
-            <select {...register('depositStatus')} className={inputCls}>
-              <option value="held">محتجز</option>
-              <option value="returned">مُعاد</option>
-              <option value="deducted">مخصوم</option>
-            </select>
-          </FormField>
-          <FormField label="حالة الحجز" error="">
-            <select {...register('status')} className={inputCls}>
-              <option value="confirmed">مؤكد</option>
-              <option value="checkedin">وصل</option>
-              <option value="checkedout">غادر</option>
-              <option value="cancelled">ملغي</option>
-            </select>
-          </FormField>
+          </div>
+        )}
+
+        {/* Filter chips */}
+        <div style={{display:'flex',gap:'8px',marginBottom:'12px',overflowX:'auto',paddingBottom:'4px'}}>
+          {[['all','الكل'],['confirmed','مؤكد'],['checkedin','وصل'],['checkedout','غادر'],['cancelled','ملغي']].map(([v,l])=>(
+            <button key={v} onClick={()=>setFilterStatus(v)}
+              style={{padding:'7px 14px',border:'none',borderRadius:'20px',cursor:'pointer',fontSize:'12px',fontWeight:'500',whiteSpace:'nowrap',background:filterStatus===v?'#1B4F72':'#fff',color:filterStatus===v?'#fff':'#374151',border:filterStatus===v?'none':'1px solid #e5e7eb'}}>
+              {l}
+            </button>
+          ))}
         </div>
-        <FormField label="ملاحظات" error="">
-          <textarea {...register('notes')} className={inputCls} rows={2}/>
-        </FormField>
-        <div className="flex gap-2 pt-1">
-          <button type="submit" disabled={saving} className={btnPrimary}>
-            {saving ? 'جارٍ الحفظ...' : booking ? 'حفظ التعديلات' : 'حفظ الحجز'}
-          </button>
-          <button type="button" onClick={onClose} className={btnSecondary}>إلغاء</button>
+
+        {/* Bookings list */}
+        {filtered.length === 0 ? (
+          <div style={{background:'#fff',borderRadius:'16px',padding:'40px',textAlign:'center',border:'1px solid #e5e7eb'}}>
+            <div style={{fontSize:'48px',marginBottom:'12px'}}>🏨</div>
+            <p style={{color:'#6b7280',fontSize:'14px',margin:0}}>لا توجد حجوزات</p>
+          </div>
+        ) : (
+          <div style={{display:'flex',flexDirection:'column',gap:'12px'}}>
+            {filtered.map(b => {
+              const ch = CHANNELS[b.channel] || CHANNELS.other;
+              const st = STATUS[b.status] || STATUS.confirmed;
+              const dp = DEPOSIT[b.depositStatus] || DEPOSIT.held;
+              return (
+                <div key={b.id} style={{background:'#fff',borderRadius:'16px',border:'1px solid #e5e7eb',overflow:'hidden',boxShadow:'0 1px 3px rgba(0,0,0,0.04)'}}>
+                  {/* Card header */}
+                  <div style={{padding:'14px 16px',borderBottom:'1px solid #f3f4f6',display:'flex',alignItems:'center',gap:'10px'}}>
+                    <div style={{width:'8px',height:'8px',borderRadius:'50%',background:ch.color,flexShrink:0}}/>
+                    <div style={{flex:1}}>
+                      <div style={{fontSize:'15px',fontWeight:'600',color:'#111827'}}>{b.guestName}</div>
+                      <div style={{fontSize:'12px',color:'#6b7280'}}>{b.guestPhone}</div>
+                    </div>
+                    <span style={{background:ch.bg,color:ch.color,padding:'4px 10px',borderRadius:'20px',fontSize:'11px',fontWeight:'600'}}>{ch.label}</span>
+                  </div>
+                  {/* Card body */}
+                  <div style={{padding:'12px 16px'}}>
+                    <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:'12px',marginBottom:'12px'}}>
+                      <div style={{textAlign:'center'}}>
+                        <div style={{fontSize:'11px',color:'#9ca3af',marginBottom:'2px'}}>الشقة</div>
+                        <div style={{fontSize:'16px',fontWeight:'700',color:'#1B4F72'}}>{b.unitNumber}</div>
+                      </div>
+                      <div style={{textAlign:'center'}}>
+                        <div style={{fontSize:'11px',color:'#9ca3af',marginBottom:'2px'}}>المدة</div>
+                        <div style={{fontSize:'13px',fontWeight:'600',color:'#374151'}}>{fmtDate(b.checkinDate)} → {fmtDate(b.checkoutDate)}</div>
+                        <div style={{fontSize:'11px',color:'#6b7280'}}>{b.nights} ليلة</div>
+                      </div>
+                      <div style={{textAlign:'center'}}>
+                        <div style={{fontSize:'11px',color:'#9ca3af',marginBottom:'2px'}}>الصافي</div>
+                        <div style={{fontSize:'15px',fontWeight:'700',color:'#16a34a'}}>{b.netRevenue?.toLocaleString('ar-SA')}</div>
+                        <div style={{fontSize:'11px',color:'#6b7280'}}>ر.س</div>
+                      </div>
+                    </div>
+                    {/* Badges row */}
+                    <div style={{display:'flex',gap:'6px',flexWrap:'wrap',marginBottom:'12px'}}>
+                      <span style={{background:st.bg,color:st.color,padding:'3px 10px',borderRadius:'10px',fontSize:'11px'}}>{st.label}</span>
+                      {b.depositAmount > 0 && (
+                        <button onClick={()=>b.depositStatus==='held'&&b.status==='checkedout'?returnDeposit(b):null}
+                          style={{background:dp.bg,color:dp.color,padding:'3px 10px',borderRadius:'10px',fontSize:'11px',border:'none',cursor:b.depositStatus==='held'?'pointer':'default'}}>
+                          تأمين: {dp.label} ({b.depositAmount?.toLocaleString()})
+                        </button>
+                      )}
+                    </div>
+                    {/* Action buttons */}
+                    <div style={{display:'flex',gap:'8px'}}>
+                      {b.status === 'confirmed' && (
+                        <button onClick={()=>changeStatus(b,'checkedin')} style={{flex:1,padding:'8px',background:'#d1fae5',color:'#065f46',border:'none',borderRadius:'8px',cursor:'pointer',fontSize:'12px',fontWeight:'600'}}>
+                          ✓ وصل
+                        </button>
+                      )}
+                      {b.status === 'checkedin' && (
+                        <button onClick={()=>changeStatus(b,'checkedout')} style={{flex:1,padding:'8px',background:'#f3f4f6',color:'#374151',border:'none',borderRadius:'8px',cursor:'pointer',fontSize:'12px',fontWeight:'600'}}>
+                          ✓ غادر
+                        </button>
+                      )}
+                      <button onClick={()=>{setEditBooking(b);setForm({unitId:b.unitId,guestName:b.guestName,guestPhone:b.guestPhone||'',channel:b.channel,checkinDate:'',checkoutDate:'',totalRevenue:String(b.totalRevenue),platformFee:String(b.platformFee||0),depositAmount:String(b.depositAmount||0),depositStatus:b.depositStatus,status:b.status,notes:b.notes||''});setShowModal(true);}}
+                        style={{padding:'8px 14px',background:'#fff',border:'1px solid #e5e7eb',borderRadius:'8px',cursor:'pointer',fontSize:'12px'}}>
+                        تعديل
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      {/* Booking Modal */}
+      {showModal && (
+        <div style={{position:'fixed',inset:'0',background:'rgba(0,0,0,0.6)',display:'flex',alignItems:'flex-end',justifyContent:'center',zIndex:1000}} onClick={()=>setShowModal(false)}>
+          <div style={{background:'#fff',borderRadius:'20px 20px 0 0',padding:'24px',width:'100%',maxWidth:'500px',maxHeight:'90vh',overflowY:'auto'}} onClick={e=>e.stopPropagation()}>
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'20px'}}>
+              <h2 style={{margin:0,fontSize:'17px',color:'#1B4F72',fontWeight:'600'}}>{editBooking?'تعديل حجز':'حجز جديد'}</h2>
+              <button onClick={()=>setShowModal(false)} style={{border:'none',background:'#f3f4f6',borderRadius:'50%',width:'32px',height:'32px',cursor:'pointer',fontSize:'16px'}}>✕</button>
+            </div>
+
+            <div style={{display:'flex',flexDirection:'column',gap:'14px'}}>
+              <div>
+                <label style={labelStyle}>الشقة</label>
+                <select value={form.unitId} onChange={e=>setForm(f=>({...f,unitId:e.target.value}))} style={inputStyle}>
+                  {units.map(u=><option key={u.id} value={u.id}>شقة {u.unitNumber}</option>)}
+                </select>
+              </div>
+              <div>
+                <label style={labelStyle}>المنصة</label>
+                <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:'8px'}}>
+                  {Object.entries(CHANNELS).map(([k,v])=>(
+                    <button key={k} onClick={()=>setForm(f=>({...f,channel:k}))}
+                      style={{padding:'8px 4px',border:`2px solid ${form.channel===k?v.color:'#e5e7eb'}`,borderRadius:'10px',background:form.channel===k?v.bg:'#fff',cursor:'pointer',fontSize:'12px',fontWeight:'600',color:v.color}}>
+                      {v.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'12px'}}>
+                <div>
+                  <label style={labelStyle}>اسم الضيف</label>
+                  <input value={form.guestName} onChange={e=>setForm(f=>({...f,guestName:e.target.value}))} style={inputStyle}/>
+                </div>
+                <div>
+                  <label style={labelStyle}>رقم الجوال</label>
+                  <input value={form.guestPhone} onChange={e=>setForm(f=>({...f,guestPhone:e.target.value}))} style={inputStyle}/>
+                </div>
+                <div>
+                  <label style={labelStyle}>تاريخ الوصول</label>
+                  <input type="date" value={form.checkinDate} onChange={e=>setForm(f=>({...f,checkinDate:e.target.value}))} style={inputStyle}/>
+                </div>
+                <div>
+                  <label style={labelStyle}>تاريخ المغادرة</label>
+                  <input type="date" value={form.checkoutDate} onChange={e=>setForm(f=>({...f,checkoutDate:e.target.value}))} style={inputStyle}/>
+                </div>
+              </div>
+              {nights > 0 && (
+                <div style={{background:'#dbeafe',borderRadius:'10px',padding:'10px 14px',fontSize:'13px',color:'#1e40af',fontWeight:'600',textAlign:'center'}}>
+                  {nights} ليلة
+                </div>
+              )}
+              <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'12px'}}>
+                <div>
+                  <label style={labelStyle}>الإيراد الإجمالي (ر.س)</label>
+                  <input type="number" value={form.totalRevenue} onChange={e=>setForm(f=>({...f,totalRevenue:e.target.value}))} style={inputStyle}/>
+                </div>
+                <div>
+                  <label style={labelStyle}>عمولة المنصة (ر.س)</label>
+                  <input type="number" value={form.platformFee} onChange={e=>setForm(f=>({...f,platformFee:e.target.value}))} style={inputStyle}/>
+                </div>
+                <div>
+                  <label style={labelStyle}>مبلغ التأمين (ر.س)</label>
+                  <input type="number" value={form.depositAmount} onChange={e=>setForm(f=>({...f,depositAmount:e.target.value}))} style={inputStyle}/>
+                </div>
+                <div>
+                  <label style={labelStyle}>حالة التأمين</label>
+                  <select value={form.depositStatus} onChange={e=>setForm(f=>({...f,depositStatus:e.target.value}))} style={inputStyle}>
+                    <option value="held">محتجز</option><option value="returned">مُعاد</option><option value="deducted">مخصوم</option>
+                  </select>
+                </div>
+              </div>
+              <div>
+                <label style={labelStyle}>حالة الحجز</label>
+                <select value={form.status} onChange={e=>setForm(f=>({...f,status:e.target.value}))} style={inputStyle}>
+                  <option value="confirmed">مؤكد</option><option value="checkedin">وصل</option><option value="checkedout">غادر</option><option value="cancelled">ملغي</option>
+                </select>
+              </div>
+            </div>
+
+            <div style={{display:'flex',gap:'10px',marginTop:'24px'}}>
+              <button onClick={saveBooking} disabled={saving}
+                style={{flex:1,padding:'13px',background:'#1B4F72',color:'#fff',border:'none',borderRadius:'12px',cursor:'pointer',fontSize:'15px',fontWeight:'600',opacity:saving?0.7:1}}>
+                {saving?'جارٍ الحفظ...':editBooking?'حفظ التعديلات':'حفظ الحجز'}
+              </button>
+              <button onClick={()=>setShowModal(false)} style={{padding:'13px 20px',background:'#f3f4f6',color:'#374151',border:'none',borderRadius:'12px',cursor:'pointer',fontSize:'15px'}}>
+                إلغاء
+              </button>
+            </div>
+          </div>
         </div>
-      </form>
-    </Modal>
+      )}
+    </div>
   );
 }
 
-// shared UI helpers (reused across pages)
-function KpiCard({ label, value, sub, accent }: any) {
-  return (
-    <div className="bg-white rounded-xl border border-gray-100 p-4 relative overflow-hidden">
-      <div className="absolute top-0 right-0 w-1 h-full rounded-r-xl" style={{ background: accent }}/>
-      <div className="text-xs text-gray-400 mb-1 pr-2">{label}</div>
-      <div className="text-xl font-medium text-gray-800 pr-2">{value}</div>
-      {sub && <div className="text-[10px] text-gray-400 mt-1 pr-2 truncate">{sub}</div>}
-    </div>
-  );
-}
-function Modal({ title, onClose, children }: any) {
-  return (
-    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4" dir="rtl">
-      <div className="bg-white rounded-2xl w-full max-w-lg max-h-[90vh] overflow-y-auto shadow-2xl">
-        <div className="flex items-center justify-between p-5 border-b border-gray-100">
-          <h2 className="text-sm font-medium text-gray-800">{title}</h2>
-          <button onClick={onClose} className="text-gray-400 hover:text-gray-600 text-xl">✕</button>
-        </div>
-        <div className="p-5">{children}</div>
-      </div>
-    </div>
-  );
-}
-function FormField({ label, error, children }: any) {
-  return (
-    <div>
-      <label className="block text-xs text-gray-500 mb-1">{label}</label>
-      {children}
-      {error && <p className="text-red-500 text-xs mt-0.5">{error}</p>}
-    </div>
-  );
-}
-const inputCls     = 'w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400';
-const btnPrimary   = 'bg-[#1B4F72] text-white text-sm rounded-lg px-5 py-2 hover:bg-[#2E86C1] transition-colors disabled:opacity-60';
-const btnSecondary = 'border border-gray-200 text-gray-600 text-sm rounded-lg px-5 py-2 hover:bg-gray-50';
-function fmtTs(ts: any) {
-  if (!ts) return '—';
-  const d = ts?.toDate ? ts.toDate() : new Date(ts);
-  return `${d.getDate().toString().padStart(2,'0')}/${(d.getMonth()+1).toString().padStart(2,'0')}/${d.getFullYear()}`;
-}
-function fmtInputDate(ts: any) {
-  if (!ts) return '';
-  const d = ts?.toDate ? ts.toDate() : new Date(ts);
-  return d.toISOString().split('T')[0];
-}
-function PageLoader() {
-  return <div className="flex justify-center py-12"><div className="w-7 h-7 border-4 border-blue-500 border-t-transparent rounded-full animate-spin"/></div>;
-}
-function NoProperty() {
-  return <div className="flex items-center justify-center h-64 text-gray-400 text-sm">يرجى اختيار عقار أولاً</div>;
-}
+const labelStyle: React.CSSProperties = {display:'block',fontSize:'13px',color:'#374151',marginBottom:'6px',fontWeight:'500'};
+const inputStyle: React.CSSProperties = {width:'100%',border:'1.5px solid #e5e7eb',borderRadius:'10px',padding:'11px 14px',fontSize:'14px',boxSizing:'border-box',outline:'none',background:'#fff',fontFamily:'sans-serif'};
