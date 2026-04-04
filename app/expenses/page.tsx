@@ -21,6 +21,26 @@ function fmtDate(ts: any) {
   return `${d.getDate().toString().padStart(2,'0')}/${(d.getMonth()+1).toString().padStart(2,'0')}/${d.getFullYear()}`;
 }
 
+
+async function getPropertiesForUserLocal(uid: string) {
+  const userSnap = await getDoc(doc(db, 'users', uid));
+  if (!userSnap.exists()) return [];
+  const userData = userSnap.data() as any;
+  if (userData.role === 'owner') {
+    const snap = await getDocs(query(collection(db, 'properties'), where('ownerId', '==', uid)));
+    return snap.docs.map(d => ({ id: d.id, name: (d.data() as any).name }));
+  }
+  const ids: string[] = userData.propertyIds || [];
+  if (ids.length === 0) return [];
+  const results: any[] = [];
+  for (let i = 0; i < ids.length; i += 10) {
+    const chunk = ids.slice(i, i + 10);
+    const snap = await getDocs(query(collection(db, 'properties'), where('__name__', 'in', chunk)));
+    snap.docs.forEach(d => results.push({ id: d.id, name: (d.data() as any).name }));
+  }
+  return results;
+}
+
 export default function ExpensesPage() {
   const router = useRouter();
   const [properties, setProperties] = useState<Property[]>([]);
