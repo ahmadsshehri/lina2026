@@ -1,186 +1,110 @@
 'use client';
-import { useEffect, useState } from 'react';
-import { AuthProvider } from '../context/AuthContext';
-import AppLayout from '../components/layout/AppLayout';
-import { useStore } from '../store/useStore';
-import { getMonthlyReport, getArrearsReport } from '../lib/db';
-import {
-  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
-  ResponsiveContainer, PieChart, Pie, Cell,
-} from 'recharts';
-import { Toaster } from 'react-hot-toast';
+import { useState } from 'react';
+import { signInWithEmailAndPassword } from 'firebase/auth';
+import { auth } from '../../lib/firebase';
+import { useRouter } from 'next/navigation';
 
-const CHANNEL_COLORS: Record<string, string> = {
-  airbnb: '#E74C3C', gathern: '#27AE60',
-  booking: '#2E86C1', direct: '#D4AC0D', other: '#7D3C98',
-};
+export default function LoginPage() {
+  const router    = useRouter();
+  const [email,    setEmail]    = useState('');
+  const [password, setPassword] = useState('');
+  const [error,    setError]    = useState('');
+  const [loading,  setLoading]  = useState(false);
 
-function DashboardContent() {
-  const { activeProperty, activeMonth, setActivePage } = useStore();
-  const [report, setReport]   = useState<any>(null);
-  const [arrears, setArrears] = useState<any[]>([]);
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    setActivePage('dashboard');
-    if (!activeProperty) return;
-    const [y, m] = activeMonth.split('-').map(Number);
-    Promise.all([
-      getMonthlyReport(activeProperty.id, y, m),
-      getArrearsReport(activeProperty.id),
-    ]).then(([r, a]) => {
-      setReport(r);
-      setArrears(a);
-    }).finally(() => setLoading(false));
-  }, [activeProperty, activeMonth]);
-
-  if (!activeProperty) return (
-    <div className="flex items-center justify-center h-full text-gray-400">
-      <div className="text-center">
-        <div className="text-5xl mb-4">🏢</div>
-        <p className="text-lg font-medium text-gray-600">لا يوجد عقار مختار</p>
-        <p className="text-sm text-gray-400 mt-1">يرجى إضافة عقار من صفحة الوحدات</p>
-      </div>
-    </div>
-  );
-
-  if (loading) return (
-    <div className="flex justify-center py-20">
-      <div className="w-8 h-8 border-4 border-blue-500 border-t-transparent rounded-full animate-spin"/>
-    </div>
-  );
-
-  const r = report;
-  const fmt = (n: number) => n?.toLocaleString('ar-SA') || '0';
-
-  const expData = r ? Object.entries(r.expenseByCategory).map(([k, v]) => ({
-    name: ({electricity:'كهرباء',water:'مياه',maintenance:'صيانة',
-            salary:'رواتب',cleaning:'نظافة',other:'أخرى'} as any)[k] || k,
-    value: v as number,
-  })) : [];
-
-  const channelData = r ? Object.entries(
-    r.bookings.reduce((acc: any, b: any) => {
-      if (b.status !== 'cancelled') acc[b.channel] = (acc[b.channel] || 0) + b.netRevenue;
-      return acc;
-    }, {})
-  ).map(([k, v]) => ({ name: k, value: v as number })) : [];
+  const handleLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError('');
+    setLoading(true);
+    try {
+      await signInWithEmailAndPassword(auth, email.trim(), password);
+      router.push('/');
+    } catch (err: any) {
+      console.error(err.code, err.message);
+      const msgs: Record<string, string> = {
+        'auth/invalid-credential':  'البريد أو كلمة المرور غير صحيحة',
+        'auth/wrong-password':      'كلمة المرور غير صحيحة',
+        'auth/user-not-found':      'المستخدم غير موجود',
+        'auth/invalid-email':       'البريد الإلكتروني غير صحيح',
+        'auth/too-many-requests':   'محاولات كثيرة، انتظر قليلاً',
+        'auth/network-request-failed': 'مشكلة في الاتصال بالإنترنت',
+      };
+      setError(msgs[err.code] || `خطأ: ${err.code}`);
+    } finally {
+      setLoading(false);
+    }
+  };
 
   return (
-    <div className="p-5" dir="rtl">
-      <div className="mb-5">
-        <h1 className="text-lg font-medium text-gray-800">لوحة التحكم</h1>
-        <p className="text-sm text-gray-400">{activeProperty.name} — {activeMonth}</p>
-      </div>
-
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-5">
-        <KpiCard label="صافي الربح" value={`${fmt(r?.netProfit)} ر.س`}
-          sub={r?.netProfit > 0 ? '▲ إيجابي' : '▼ سالب'}
-          subColor={r?.netProfit > 0 ? 'text-green-600' : 'text-red-500'} accent="#1E8449"/>
-        <KpiCard label="إجمالي الإيرادات" value={`${fmt(r?.totalRevenue)} ر.س`}
-          sub={`شهري ${fmt(r?.monthlyRevenue)} + مفروش ${fmt(r?.furnishedRevenue)}`} accent="#2E86C1"/>
-        <KpiCard label="إجمالي المصاريف" value={`${fmt(r?.totalExpenses)} ر.س`}
-          sub="كهرباء + رواتب + صيانة" accent="#E74C3C"/>
-        <KpiCard label="متأخرات معلقة" value={`${arrears.length} مستأجر`}
-          sub={`${fmt(arrears.reduce((s, a) => s + a.totalDue, 0))} ر.س إجمالاً`}
-          accent={arrears.length > 0 ? '#D4AC0D' : '#1E8449'}/>
-      </div>
-
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-5">
-        <div className="bg-white rounded-xl border border-gray-100 p-4">
-          <div className="text-sm font-medium text-gray-700 mb-3">توزيع المصاريف</div>
-          <ResponsiveContainer width="100%" height={200}>
-            <PieChart>
-              <Pie data={expData} dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={75}
-                label={({ name, percent }) => `${name} ${(percent * 100).toFixed(0)}%`}>
-                {expData.map((_, i) => (
-                  <Cell key={i} fill={['#CA6F1E','#1B4F72','#7D3C98','#1E8449','#2E86C1','#D4AC0D'][i % 6]}/>
-                ))}
-              </Pie>
-              <Tooltip formatter={(v: number) => `${v.toLocaleString('ar-SA')} ر.س`}/>
-            </PieChart>
-          </ResponsiveContainer>
-        </div>
-        <div className="bg-white rounded-xl border border-gray-100 p-4">
-          <div className="text-sm font-medium text-gray-700 mb-3">إيرادات المفروشة حسب المنصة</div>
-          {channelData.length > 0 ? (
-            <ResponsiveContainer width="100%" height={200}>
-              <BarChart data={channelData} layout="vertical">
-                <CartesianGrid strokeDasharray="3 3" horizontal={false}/>
-                <XAxis type="number" tickFormatter={v => `${(v/1000).toFixed(0)}k`}/>
-                <YAxis type="category" dataKey="name" width={70}
-                  tickFormatter={(k:string) => ({airbnb:'Airbnb',gathern:'Gathern',booking:'Booking',direct:'مباشر',other:'أخرى'}[k]||k)}/>
-                <Tooltip formatter={(v: number) => `${v.toLocaleString('ar-SA')} ر.س`}/>
-                <Bar dataKey="value" radius={[0,4,4,0]}>
-                  {channelData.map((d, i) => <Cell key={i} fill={CHANNEL_COLORS[d.name] || '#888'}/>)}
-                </Bar>
-              </BarChart>
-            </ResponsiveContainer>
-          ) : (
-            <div className="h-48 flex items-center justify-center text-gray-300 text-sm">لا توجد حجوزات هذا الشهر</div>
-          )}
-        </div>
-      </div>
-
-      {arrears.length > 0 && (
-        <div className="bg-white rounded-xl border border-gray-100 overflow-hidden">
-          <div className="px-4 py-3 border-b border-gray-100 flex items-center justify-between">
-            <div className="text-sm font-medium text-gray-700">⚠️ المتأخرات المعلقة</div>
-            <span className="bg-red-50 text-red-600 text-xs px-2 py-0.5 rounded-full">{arrears.length} مستأجر</span>
+    <div
+      className="min-h-screen flex items-center justify-center bg-[#1B4F72]"
+      dir="rtl"
+    >
+      <div className="w-full max-w-sm mx-4">
+        <div className="text-center mb-8">
+          <div className="w-16 h-16 bg-white/10 rounded-2xl flex items-center justify-center mx-auto mb-4">
+            <span className="text-3xl">🏢</span>
           </div>
-          <table className="w-full text-sm">
-            <thead className="bg-gray-50">
-              <tr>{['الشقة','المستأجر','الجوال','المبلغ المتأخر','أيام التأخر','إجراء'].map(h=>(
-                <th key={h} className="px-4 py-2.5 text-right text-xs text-gray-500 font-medium">{h}</th>
-              ))}</tr>
-            </thead>
-            <tbody>
-              {arrears.map((a, i) => (
-                <tr key={i} className="border-t border-gray-50 hover:bg-gray-50/50">
-                  <td className="px-4 py-2.5 font-medium text-blue-700">{a.tenant.unitNumber}</td>
-                  <td className="px-4 py-2.5">{a.tenant.name}</td>
-                  <td className="px-4 py-2.5 text-gray-500">{a.tenant.phone}</td>
-                  <td className="px-4 py-2.5 font-medium text-red-600">{fmt(a.totalDue)} ر.س</td>
-                  <td className="px-4 py-2.5">
-                    <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${a.daysSince > 30 ? 'bg-red-50 text-red-600' : 'bg-orange-50 text-orange-600'}`}>
-                      {a.daysSince > 900 ? 'لم يدفع' : `${a.daysSince} يوم`}
-                    </span>
-                  </td>
-                  <td className="px-4 py-2.5">
-                    <button className="text-xs text-blue-600 hover:underline">تسجيل دفعة</button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          <h1 className="text-white text-xl font-medium">نظام إدارة العقارات</h1>
+          <p className="text-white/50 text-sm mt-1">Property Management System</p>
         </div>
-      )}
-    </div>
-  );
-}
 
-function KpiCard({ label, value, sub, subColor = 'text-gray-400', accent }: {
-  label: string; value: string; sub: string; subColor?: string; accent: string;
-}) {
-  return (
-    <div className="bg-white rounded-xl border border-gray-100 p-4 overflow-hidden relative">
-      <div className="absolute top-0 right-0 w-1 h-full rounded-r-xl" style={{ background: accent }}/>
-      <div className="text-xs text-gray-400 mb-1.5 pr-2">{label}</div>
-      <div className="text-xl font-medium text-gray-800 pr-2">{value}</div>
-      <div className={`text-xs mt-1 pr-2 ${subColor}`}>{sub}</div>
-    </div>
-  );
-}
+        <div className="bg-white rounded-2xl p-8 shadow-2xl">
+          <h2 className="text-gray-800 text-lg font-medium mb-6">تسجيل الدخول</h2>
+          <form onSubmit={handleLogin} className="space-y-4">
 
-export default function HomePage() {
-  return (
-    <>
-      <Toaster position="top-center" toastOptions={{ duration: 3000, style: { direction: 'rtl' } }}/>
-      <AuthProvider>
-        <AppLayout>
-          <DashboardContent />
-        </AppLayout>
-      </AuthProvider>
-    </>
+            <div>
+              <label className="block text-xs text-gray-500 mb-1.5">
+                البريد الإلكتروني
+              </label>
+              <input
+                type="email"
+                value={email}
+                onChange={e => setEmail(e.target.value)}
+                className="w-full border border-gray-200 rounded-lg px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                placeholder="example@email.com"
+                dir="ltr"
+                required
+                autoComplete="email"
+              />
+            </div>
+
+            <div>
+              <label className="block text-xs text-gray-500 mb-1.5">
+                كلمة المرور
+              </label>
+              <input
+                type="password"
+                value={password}
+                onChange={e => setPassword(e.target.value)}
+                className="w-full border border-gray-200 rounded-lg px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                placeholder="••••••••"
+                required
+                autoComplete="current-password"
+              />
+            </div>
+
+            {error && (
+              <div className="bg-red-50 border border-red-200 rounded-lg px-4 py-3 text-sm text-red-600 text-center">
+                {error}
+              </div>
+            )}
+
+            <button
+              type="submit"
+              disabled={loading}
+              className="w-full bg-[#1B4F72] text-white rounded-lg py-2.5 text-sm font-medium hover:bg-[#2E86C1] transition-colors disabled:opacity-60 flex items-center justify-center gap-2"
+            >
+              {loading ? (
+                <>
+                  <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"/>
+                  جارٍ الدخول...
+                </>
+              ) : 'دخول'}
+            </button>
+
+          </form>
+        </div>
+      </div>
+    </div>
   );
 }
