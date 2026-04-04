@@ -2,7 +2,7 @@
 import { useEffect, useState } from 'react';
 import { onAuthStateChanged, createUserWithEmailAndPassword } from 'firebase/auth';
 import { auth, db } from '../../lib/firebase';
-import { collection, getDocs, setDoc, updateDoc, doc, query, where, serverTimestamp } from 'firebase/firestore';
+import { collection, getDocs, setDoc, updateDoc, doc, query, where, serverTimestamp, getDoc } from 'firebase/firestore';
 import { useRouter } from 'next/navigation';
 
 interface AppUser {
