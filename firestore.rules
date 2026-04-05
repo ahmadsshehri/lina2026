@@ -1,13 +1,7 @@
-// firestore.rules
-// ─────────────────────────────────────────────────────────────────────────────
-// قواعد أمان Firestore — RBAC كامل
-// ─────────────────────────────────────────────────────────────────────────────
-
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // ─── دوال مساعدة ───────────────────────────────────────────────────────
     function isAuth() {
       return request.auth != null;
     }
@@ -25,12 +19,13 @@ service cloud.firestore {
     function isAccountant()  { return isAuth() && role() == 'accountant'; }
     function isMaintenance() { return isAuth() && role() == 'maintenance'; }
 
+    // المالك يصل لكل عقاراته، غيره يصل لعقارات محددة في propertyIds
     function canAccessProperty(propId) {
       return isOwner() ||
         (isAuth() && propId in userDoc().propertyIds);
     }
 
-    // ─── المستخدمون ─────────────────────────────────────────────────────────
+    // ─── المستخدمون ─────────────────────────────────────────────
     match /users/{userId} {
       allow read:   if isAuth() && (request.auth.uid == userId || isOwner());
       allow create: if isOwner();
@@ -38,7 +33,7 @@ service cloud.firestore {
       allow delete: if isOwner();
     }
 
-    // ─── العقارات ────────────────────────────────────────────────────────────
+    // ─── العقارات ────────────────────────────────────────────────
     match /properties/{propId} {
       allow read:   if isAuth() && canAccessProperty(propId);
       allow create: if isOwner();
@@ -46,65 +41,104 @@ service cloud.firestore {
       allow delete: if isOwner();
     }
 
-    // ─── الوحدات ─────────────────────────────────────────────────────────────
+    // ─── الوحدات ─────────────────────────────────────────────────
+    // الإصلاح: نفصل read عن write، ونستخدم request.resource للـ create
     match /units/{unitId} {
-      allow read:   if isAuth() && canAccessProperty(resource.data.propertyId);
-      allow write:  if isAuth() && canAccessProperty(resource.data.propertyId)
-                       && (isOwner() || isManager());
+      allow read: if isAuth() && canAccessProperty(resource.data.propertyId);
+      // create: نستخدم request.resource (البيانات القادمة)
+      allow create: if isAuth()
+                    && canAccessProperty(request.resource.data.propertyId)
+                    && (isOwner() || isManager());
+      // update/delete: نستخدم resource (البيانات الحالية)
+      allow update: if isAuth()
+                    && canAccessProperty(resource.data.propertyId)
+                    && (isOwner() || isManager());
+      allow delete: if isAuth()
+                    && canAccessProperty(resource.data.propertyId)
+                    && isOwner();
     }
 
-    // ─── المستأجرون ──────────────────────────────────────────────────────────
+    // ─── المستأجرون ──────────────────────────────────────────────
     match /tenants/{tenantId} {
-      allow read:   if isAuth() && canAccessProperty(resource.data.propertyId)
-                       && !isMaintenance();
-      allow create: if isAuth() && (isOwner() || isManager());
-      allow update: if isAuth() && (isOwner() || isManager() || isAccountant());
+      allow read:   if isAuth()
+                    && canAccessProperty(resource.data.propertyId)
+                    && !isMaintenance();
+      allow create: if isAuth()
+                    && canAccessProperty(request.resource.data.propertyId)
+                    && (isOwner() || isManager());
+      allow update: if isAuth()
+                    && canAccessProperty(resource.data.propertyId)
+                    && (isOwner() || isManager() || isAccountant());
       allow delete: if isOwner();
     }
 
-    // ─── دفعات الإيجار ───────────────────────────────────────────────────────
+    // ─── دفعات الإيجار ────────────────────────────────────────────
     match /rentPayments/{paymentId} {
-      allow read:   if isAuth() && canAccessProperty(resource.data.propertyId)
-                       && !isMaintenance();
-      allow create: if isAuth() && (isOwner() || isManager() || isAccountant());
-      allow update: if isOwner();   // التعديل للمالك فقط
-      allow delete: if isOwner();
-    }
-
-    // ─── الحجوزات المفروشة ────────────────────────────────────────────────────
-    match /bookings/{bookingId} {
-      allow read:   if isAuth() && canAccessProperty(resource.data.propertyId)
-                       && !isMaintenance();
-      allow create: if isAuth() && (isOwner() || isManager());
-      allow update: if isAuth() && (isOwner() || isManager());
-      allow delete: if isOwner();
-    }
-
-    // ─── المصاريف ────────────────────────────────────────────────────────────
-    match /expenses/{expenseId} {
-      allow read:   if isAuth() && canAccessProperty(resource.data.propertyId)
-                       && !isMaintenance();
-      allow create: if isAuth() && (isOwner() || isManager() || isAccountant());
+      allow read:   if isAuth()
+                    && canAccessProperty(resource.data.propertyId)
+                    && !isMaintenance();
+      allow create: if isAuth()
+                    && canAccessProperty(request.resource.data.propertyId)
+                    && (isOwner() || isManager() || isAccountant());
       allow update: if isOwner();
       allow delete: if isOwner();
     }
 
-    // ─── عدادات الكهرباء ─────────────────────────────────────────────────────
+    // ─── الحجوزات ────────────────────────────────────────────────
+    match /bookings/{bookingId} {
+      allow read:   if isAuth()
+                    && canAccessProperty(resource.data.propertyId)
+                    && !isMaintenance();
+      allow create: if isAuth()
+                    && canAccessProperty(request.resource.data.propertyId)
+                    && (isOwner() || isManager());
+      allow update: if isAuth()
+                    && canAccessProperty(resource.data.propertyId)
+                    && (isOwner() || isManager());
+      allow delete: if isOwner();
+    }
+
+    // ─── المصاريف ────────────────────────────────────────────────
+    match /expenses/{expenseId} {
+      allow read:   if isAuth()
+                    && canAccessProperty(resource.data.propertyId)
+                    && !isMaintenance();
+      allow create: if isAuth()
+                    && canAccessProperty(request.resource.data.propertyId)
+                    && (isOwner() || isManager() || isAccountant());
+      allow update: if isOwner();
+      allow delete: if isOwner();
+    }
+
+    // ─── عدادات الكهرباء ──────────────────────────────────────────
     match /electricMeters/{meterId} {
-      allow read:   if isAuth() && canAccessProperty(resource.data.propertyId);
-      allow write:  if isAuth() && (isOwner() || isManager());
+      allow read:  if isAuth() && canAccessProperty(resource.data.propertyId);
+      allow create: if isAuth()
+                    && canAccessProperty(request.resource.data.propertyId)
+                    && (isOwner() || isManager());
+      allow update: if isAuth()
+                    && canAccessProperty(resource.data.propertyId)
+                    && (isOwner() || isManager());
+      allow delete: if isOwner();
     }
 
     match /meterReadings/{readingId} {
-      allow read:   if isAuth() && canAccessProperty(resource.data.propertyId);
-      allow write:  if isAuth() && (isOwner() || isManager());
+      allow read:  if isAuth() && canAccessProperty(resource.data.propertyId);
+      allow create: if isAuth()
+                    && canAccessProperty(request.resource.data.propertyId)
+                    && (isOwner() || isManager());
+      allow update: if isOwner();
+      allow delete: if isOwner();
     }
 
-    // ─── التحويلات المالية ────────────────────────────────────────────────────
+    // ─── التحويلات المالية ────────────────────────────────────────
     match /transfers/{transferId} {
-      allow read:   if isAuth() && canAccessProperty(resource.data.propertyId)
-                       && (isOwner() || isManager() || isAccountant());
-      allow create: if isAuth() && (isOwner() || isManager());
+      allow read:   if isAuth()
+                    && canAccessProperty(resource.data.propertyId)
+                    && (isOwner() || isManager() || isAccountant());
+      allow create: if isAuth()
+                    && canAccessProperty(request.resource.data.propertyId)
+                    && (isOwner() || isManager());
       allow update: if isOwner();
       allow delete: if isOwner();
     }
