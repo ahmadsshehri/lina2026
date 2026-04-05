@@ -2,13 +2,29 @@
 import { useEffect, useState } from 'react';
 import { onAuthStateChanged } from 'firebase/auth';
 import { auth, db } from '../../lib/firebase';
-import { collection, getDocs, addDoc, query, where, doc, getDoc, serverTimestamp, Timestamp } from 'firebase/firestore';
+import {
+  collection, getDocs, addDoc, query, where,
+  serverTimestamp, Timestamp
+} from 'firebase/firestore';
 import { useRouter } from 'next/navigation';
+import { getCurrentUser, loadPropertiesForUser, AppUserBasic, PropertyBasic } from '../../lib/userHelpers';
 
-interface Property { id: string; name: string; }
-interface Transfer { id: string; type: string; amount: number; date: any; fromUser: string; toUser: string; paymentMethod: string; notes: string; }
-interface MonthReport { monthlyRevenue: number; furnishedRevenue: number; totalRevenue: number; totalExpenses: number; netProfit: number; }
-
+interface Transfer {
+  id: string; type: string; amount: number; date: any;
+  fromUser: string; toUser: string; paymentMethod: string; notes: string;
+}
+interface MonthReport {
+  // إيرادات
+  rentReceivedByManager: number;   // إيجار شهري استلمه المسؤول
+  rentReceivedByOwner: number;     // إيجار شهري استلمه المالك
+  furnishedRevenue: number;        // إيرادات مفروشة
+  totalRevenue: number;
+  // مصاريف
+  expensesByManager: number;       // مصاريف دفعها المسؤول
+  expensesByOwner: number;         // مصاريف دفعها المالك
+  totalExpenses: number;
+  netProfit: number;
+}
 
 function fmtDate(ts: any) {
   if (!ts) return '—';
@@ -21,28 +37,10 @@ function currentMonthStr() {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
 }
 
-
-async function loadPropertiesForUser(uid: string) {
-  const userSnap = await getDoc(doc(db, 'users', uid));
-  if (!userSnap.exists()) return [];
-  const userData = userSnap.data() as any;
-  if (userData.role === 'owner') {
-    const snap = await getDocs(query(collection(db, 'properties'), where('ownerId', '==', uid)));
-    return snap.docs.map((d: any) => ({ id: d.id, name: d.data().name }));
-  }
-  const ids: string[] = userData.propertyIds || [];
-  if (ids.length === 0) return [];
-  const results: any[] = [];
-  for (let i = 0; i < ids.length; i += 10) {
-    const chunk = ids.slice(i, i + 10);
-    const snap = await getDocs(query(collection(db, 'properties'), where('__name__', 'in', chunk)));
-    snap.docs.forEach((d: any) => results.push({ id: d.id, name: d.data().name }));
-  }
-  return results;
-}
 export default function CashflowPage() {
   const router = useRouter();
-  const [properties, setProperties] = useState<Property[]>([]);
+  const [appUser, setAppUser] = useState<AppUserBasic | null>(null);
+  const [properties, setProperties] = useState<PropertyBasic[]>([]);
   const [propId, setPropId] = useState('');
   const [transfers, setTransfers] = useState<Transfer[]>([]);
   const [report, setReport] = useState<MonthReport | null>(null);
@@ -50,12 +48,19 @@ export default function CashflowPage() {
   const [showModal, setShowModal] = useState(false);
   const [saving, setSaving] = useState(false);
   const [selectedMonth, setSelectedMonth] = useState(currentMonthStr());
-  const [form, setForm] = useState({ type: 'owner_transfer', amount: '', date: new Date().toISOString().split('T')[0], paymentMethod: 'transfer', notes: '' });
+  const [form, setForm] = useState({
+    type: 'owner_transfer', amount: '',
+    date: new Date().toISOString().split('T')[0],
+    paymentMethod: 'transfer', notes: '',
+  });
 
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, async (user) => {
+    const unsub = onAuthStateChanged(auth, async (fbUser) => {
+      if (!fbUser) { router.push('/login'); return; }
+      const user = await getCurrentUser(fbUser.uid);
       if (!user) { router.push('/login'); return; }
-      const props = await loadPropertiesForUser(user.uid);
+      setAppUser(user);
+      const props = await loadPropertiesForUser(fbUser.uid, user.role);
       setProperties(props);
       if (props.length > 0) {
         setPropId(props[0].id);
@@ -78,7 +83,7 @@ export default function CashflowPage() {
       getDocs(query(collection(db, 'expenses'), where('propertyId', '==', pid))),
     ]);
 
-    // Filter by month
+    // التحويلات في الشهر المحدد
     const monthTransfers = tSnap.docs
       .map(d => ({ id: d.id, ...d.data() } as Transfer))
       .filter(t => {
@@ -88,15 +93,25 @@ export default function CashflowPage() {
       .sort((a, b) => (b.date?.seconds || 0) - (a.date?.seconds || 0));
     setTransfers(monthTransfers);
 
-    // Monthly report
-    const monthlyRevenue = paySnap.docs
+    // الدفعات في الشهر
+    const monthPayments = paySnap.docs
       .map(d => d.data() as any)
       .filter(p => {
         const d = p.paidDate?.toDate ? p.paidDate.toDate() : null;
         return d && d >= startOfMonth && d <= endOfMonth;
-      })
-      .reduce((s, p) => s + (p.amountPaid || 0), 0);
+      });
 
+    // إيرادات مستلمة بواسطة المسؤول
+    const rentReceivedByManager = monthPayments
+      .filter(p => p.receivedBy === 'manager' || !p.receivedBy) // القديم بدون receivedBy يُحسب كمسؤول
+      .reduce((s: number, p: any) => s + (p.amountPaid || 0), 0);
+
+    // إيرادات مستلمة بواسطة المالك مباشرة
+    const rentReceivedByOwner = monthPayments
+      .filter(p => p.receivedBy === 'owner')
+      .reduce((s: number, p: any) => s + (p.amountPaid || 0), 0);
+
+    // إيرادات مفروشة
     const furnishedRevenue = bookSnap.docs
       .map(d => d.data() as any)
       .filter(b => {
@@ -104,22 +119,36 @@ export default function CashflowPage() {
         const d = b.checkinDate?.toDate ? b.checkinDate.toDate() : null;
         return d && d >= startOfMonth && d <= endOfMonth;
       })
-      .reduce((s, b) => s + (b.netRevenue || 0), 0);
+      .reduce((s: number, b: any) => s + (b.netRevenue || 0), 0);
 
-    const totalExpenses = expSnap.docs
+    // مصاريف في الشهر
+    const monthExpenses = expSnap.docs
       .map(d => d.data() as any)
       .filter(e => {
         const d = e.date?.toDate ? e.date.toDate() : null;
         return d && d >= startOfMonth && d <= endOfMonth;
-      })
-      .reduce((s, e) => s + (e.amount || 0), 0);
+      });
+
+    const expensesByManager = monthExpenses
+      .filter(e => e.paidBy === 'manager' || !e.paidBy)
+      .reduce((s: number, e: any) => s + (e.amount || 0), 0);
+
+    const expensesByOwner = monthExpenses
+      .filter(e => e.paidBy === 'owner')
+      .reduce((s: number, e: any) => s + (e.amount || 0), 0);
+
+    const totalRevenue = rentReceivedByManager + rentReceivedByOwner + furnishedRevenue;
+    const totalExpenses = expensesByManager + expensesByOwner;
 
     setReport({
-      monthlyRevenue,
+      rentReceivedByManager,
+      rentReceivedByOwner,
       furnishedRevenue,
-      totalRevenue: monthlyRevenue + furnishedRevenue,
+      totalRevenue,
+      expensesByManager,
+      expensesByOwner,
       totalExpenses,
-      netProfit: monthlyRevenue + furnishedRevenue - totalExpenses,
+      netProfit: totalRevenue - totalExpenses,
     });
   };
 
@@ -145,10 +174,16 @@ export default function CashflowPage() {
     setSaving(false);
   };
 
-  const totalTransferredToOwner = transfers.filter(t => t.type === 'owner_transfer').reduce((s, t) => s + t.amount, 0);
-  const remaining = (report?.netProfit || 0) - totalTransferredToOwner;
+  const totalTransferredToOwner = transfers
+    .filter(t => t.type === 'owner_transfer')
+    .reduce((s, t) => s + t.amount, 0);
 
-  // Month options (last 12)
+  // ما يستحقه المالك = ما استلمه المسؤول + إيرادات مفروشة - مصاريف المسؤول
+  const dueToOwner = (report?.rentReceivedByManager || 0) +
+                     (report?.furnishedRevenue || 0) -
+                     (report?.expensesByManager || 0);
+  const remaining = dueToOwner - totalTransferredToOwner;
+
   const monthOptions = Array.from({ length: 12 }, (_, i) => {
     const d = new Date();
     d.setMonth(d.getMonth() - i);
@@ -158,12 +193,9 @@ export default function CashflowPage() {
   });
 
   if (loading) return (
-    <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100vh', background: '#f9fafb' }}>
-      <div style={{ textAlign: 'center' }}>
-        <div style={{ width: '40px', height: '40px', border: '3px solid #1B4F72', borderTopColor: 'transparent', borderRadius: '50%', animation: 'spin 0.8s linear infinite', margin: '0 auto 12px' }} />
-        <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
-        <p style={{ color: '#6b7280', fontFamily: 'sans-serif', fontSize: '14px' }}>جارٍ التحميل...</p>
-      </div>
+    <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100vh' }}>
+      <div style={{ width: '40px', height: '40px', border: '3px solid #1B4F72', borderTopColor: 'transparent', borderRadius: '50%', animation: 'spin 0.8s linear infinite' }} />
+      <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
     </div>
   );
 
@@ -176,10 +208,11 @@ export default function CashflowPage() {
           <span style={{ color: '#fff', fontSize: '18px' }}>←</span>
         </button>
         <div style={{ flex: 1 }}>
-          <h1 style={{ margin: 0, fontSize: '17px', fontWeight: '600', color: '#fff' }}>التدفق المالي</h1>
+          <h1 style={{ margin: 0, fontSize: '17px', fontWeight: '600', color: '#fff' }}>التدفق النقدي</h1>
           <p style={{ margin: 0, fontSize: '12px', color: 'rgba(255,255,255,0.6)' }}>التسويات والتحويلات</p>
         </div>
-        <button onClick={() => setShowModal(true)} style={{ background: '#D4AC0D', border: 'none', borderRadius: '10px', padding: '10px 14px', cursor: 'pointer', color: '#fff', fontSize: '13px', fontWeight: '600' }}>
+        <button onClick={() => setShowModal(true)}
+          style={{ background: '#D4AC0D', border: 'none', borderRadius: '10px', padding: '10px 14px', cursor: 'pointer', color: '#fff', fontSize: '13px', fontWeight: '600' }}>
           + تحويل
         </button>
       </div>
@@ -190,78 +223,144 @@ export default function CashflowPage() {
         <div style={{ display: 'grid', gridTemplateColumns: properties.length > 1 ? '1fr 1fr' : '1fr', gap: '10px', marginBottom: '16px' }}>
           {properties.length > 1 && (
             <select value={propId} onChange={e => { setPropId(e.target.value); loadData(e.target.value, selectedMonth); }}
-              style={{ border: '1.5px solid #e5e7eb', borderRadius: '12px', padding: '12px 16px', fontSize: '14px', background: '#fff' }}>
+              style={selStyle}>
               {properties.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
             </select>
           )}
           <select value={selectedMonth} onChange={e => { setSelectedMonth(e.target.value); loadData(propId, e.target.value); }}
-            style={{ border: '1.5px solid #e5e7eb', borderRadius: '12px', padding: '12px 16px', fontSize: '14px', background: '#fff' }}>
+            style={selStyle}>
             {monthOptions.map(m => <option key={m.val} value={m.val}>{m.label}</option>)}
           </select>
         </div>
 
-        {/* Settlement card */}
-        <div style={{ background: '#fff', borderRadius: '16px', border: '1px solid #e5e7eb', padding: '20px', marginBottom: '16px', boxShadow: '0 1px 3px rgba(0,0,0,0.06)' }}>
+        {/* ═══ بطاقة التدفق النقدي التفصيلية ═══ */}
+        <div style={{ background: '#fff', borderRadius: '16px', border: '1px solid #e5e7eb', padding: '20px', marginBottom: '16px', boxShadow: '0 1px 4px rgba(0,0,0,0.06)' }}>
           <div style={{ fontSize: '15px', fontWeight: '700', color: '#1B4F72', marginBottom: '16px' }}>
-            تسوية {monthOptions.find(m => m.val === selectedMonth)?.label}
+            📊 قائمة التدفق النقدي — {monthOptions.find(m => m.val === selectedMonth)?.label}
           </div>
 
-          {[
-            { label: 'إيرادات الإيجار الشهري', val: report?.monthlyRevenue || 0, positive: true },
-            { label: 'إيرادات الشقق المفروشة', val: report?.furnishedRevenue || 0, positive: true },
-          ].map(row => (
-            row.val > 0 ? (
-              <div key={row.label} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 0', borderBottom: '1px solid #f9fafb' }}>
-                <span style={{ fontSize: '13px', color: '#6b7280' }}>{row.label}</span>
-                <span style={{ fontSize: '14px', fontWeight: '600', color: '#16a34a' }}>+ {row.val.toLocaleString('ar-SA')} ر.س</span>
-              </div>
-            ) : null
-          ))}
+          {/* ─── الإيرادات ─── */}
+          <div style={{ marginBottom: '14px' }}>
+            <div style={{ fontSize: '12px', fontWeight: '700', color: '#065f46', background: '#d1fae5', padding: '6px 10px', borderRadius: '8px', marginBottom: '8px' }}>
+              📥 الإيرادات
+            </div>
 
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 0', borderBottom: '1px solid #f9fafb' }}>
-            <span style={{ fontSize: '13px', color: '#6b7280' }}>إجمالي المصاريف</span>
-            <span style={{ fontSize: '14px', fontWeight: '600', color: '#dc2626' }}>− {(report?.totalExpenses || 0).toLocaleString('ar-SA')} ر.س</span>
+            {/* إيجار استلمه المسؤول */}
+            <Row
+              label="إيجار شهري — استلمه مسؤول العقار"
+              value={report?.rentReceivedByManager || 0}
+              positive tag="مسؤول"
+              tagColor="#1e40af" tagBg="#dbeafe"
+            />
+            {/* إيجار استلمه المالك مباشرة */}
+            <Row
+              label="إيجار شهري — استلمه المالك مباشرة"
+              value={report?.rentReceivedByOwner || 0}
+              positive tag="مالك"
+              tagColor="#7c3aed" tagBg="#ede9fe"
+            />
+            {/* إيرادات مفروشة */}
+            <Row
+              label="إيرادات الشقق المفروشة"
+              value={report?.furnishedRevenue || 0}
+              positive tag="مفروش"
+              tagColor="#065f46" tagBg="#d1fae5"
+            />
+            {/* إجمالي */}
+            <div style={{ display: 'flex', justifyContent: 'space-between', padding: '10px', background: '#f0fdf4', borderRadius: '10px', marginTop: '6px' }}>
+              <span style={{ fontSize: '13px', fontWeight: '700', color: '#374151' }}>إجمالي الإيرادات</span>
+              <span style={{ fontSize: '16px', fontWeight: '700', color: '#16a34a' }}>+ {(report?.totalRevenue || 0).toLocaleString('ar-SA')} ر.س</span>
+            </div>
           </div>
 
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '14px', margin: '12px 0', background: '#f0fdf4', borderRadius: '12px' }}>
-            <span style={{ fontSize: '14px', fontWeight: '600', color: '#374151' }}>صافي الشهر</span>
-            <span style={{ fontSize: '20px', fontWeight: '700', color: (report?.netProfit || 0) >= 0 ? '#16a34a' : '#dc2626' }}>
+          {/* ─── المصاريف ─── */}
+          <div style={{ marginBottom: '14px' }}>
+            <div style={{ fontSize: '12px', fontWeight: '700', color: '#991b1b', background: '#fee2e2', padding: '6px 10px', borderRadius: '8px', marginBottom: '8px' }}>
+              📤 المصاريف
+            </div>
+
+            <Row
+              label="مصاريف دفعها مسؤول العقار"
+              value={report?.expensesByManager || 0}
+              positive={false} tag="مسؤول"
+              tagColor="#1e40af" tagBg="#dbeafe"
+            />
+            <Row
+              label="مصاريف دفعها المالك مباشرة"
+              value={report?.expensesByOwner || 0}
+              positive={false} tag="مالك"
+              tagColor="#7c3aed" tagBg="#ede9fe"
+            />
+            <div style={{ display: 'flex', justifyContent: 'space-between', padding: '10px', background: '#fef2f2', borderRadius: '10px', marginTop: '6px' }}>
+              <span style={{ fontSize: '13px', fontWeight: '700', color: '#374151' }}>إجمالي المصاريف</span>
+              <span style={{ fontSize: '16px', fontWeight: '700', color: '#dc2626' }}>− {(report?.totalExpenses || 0).toLocaleString('ar-SA')} ر.س</span>
+            </div>
+          </div>
+
+          {/* ─── الصافي ─── */}
+          <div style={{ padding: '14px', background: (report?.netProfit || 0) >= 0 ? '#f0fdf4' : '#fef2f2', borderRadius: '12px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '14px' }}>
+            <span style={{ fontSize: '14px', fontWeight: '700', color: '#374151' }}>💰 صافي الشهر</span>
+            <span style={{ fontSize: '22px', fontWeight: '700', color: (report?.netProfit || 0) >= 0 ? '#16a34a' : '#dc2626' }}>
               {(report?.netProfit || 0).toLocaleString('ar-SA')} ر.س
             </span>
           </div>
 
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 0', borderTop: '1px solid #f3f4f6' }}>
-            <span style={{ fontSize: '13px', color: '#6b7280' }}>محوّل للمالك هذا الشهر</span>
-            <span style={{ fontSize: '14px', fontWeight: '600', color: '#1e40af' }}>{totalTransferredToOwner.toLocaleString('ar-SA')} ر.س</span>
-          </div>
+          {/* ─── تسوية المسؤول ─── */}
+          <div style={{ background: '#f8fafc', borderRadius: '12px', padding: '14px', border: '1px solid #e2e8f0' }}>
+            <div style={{ fontSize: '12px', fontWeight: '700', color: '#374151', marginBottom: '10px' }}>🔄 تسوية مع مسؤول العقار</div>
 
-          {remaining !== 0 && (
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 14px', background: remaining > 0 ? '#fef3c7' : '#fee2e2', borderRadius: '10px', marginTop: '8px' }}>
-              <span style={{ fontSize: '13px', color: remaining > 0 ? '#92400e' : '#991b1b' }}>
-                {remaining > 0 ? 'متبقي للتحويل' : 'تم تحويل أكثر من الصافي'}
-              </span>
-              <span style={{ fontSize: '14px', fontWeight: '700', color: remaining > 0 ? '#d97706' : '#dc2626' }}>
-                {Math.abs(remaining).toLocaleString('ar-SA')} ر.س
-              </span>
+            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '6px', fontSize: '13px' }}>
+              <span style={{ color: '#6b7280' }}>إيجار استلمه المسؤول</span>
+              <span style={{ color: '#16a34a', fontWeight: '600' }}>+ {(report?.rentReceivedByManager || 0).toLocaleString('ar-SA')} ر.س</span>
             </div>
-          )}
+            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '6px', fontSize: '13px' }}>
+              <span style={{ color: '#6b7280' }}>إيرادات مفروشة</span>
+              <span style={{ color: '#16a34a', fontWeight: '600' }}>+ {(report?.furnishedRevenue || 0).toLocaleString('ar-SA')} ر.س</span>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '10px', fontSize: '13px' }}>
+              <span style={{ color: '#6b7280' }}>مصاريف دفعها المسؤول</span>
+              <span style={{ color: '#dc2626', fontWeight: '600' }}>− {(report?.expensesByManager || 0).toLocaleString('ar-SA')} ر.س</span>
+            </div>
+
+            <div style={{ height: '1px', background: '#e5e7eb', marginBottom: '10px' }} />
+
+            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '6px', fontSize: '13px' }}>
+              <span style={{ color: '#374151', fontWeight: '600' }}>المستحق للمالك من المسؤول</span>
+              <span style={{ color: '#1e40af', fontWeight: '700' }}>{dueToOwner.toLocaleString('ar-SA')} ر.س</span>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px', fontSize: '13px' }}>
+              <span style={{ color: '#6b7280' }}>محوّل للمالك هذا الشهر</span>
+              <span style={{ color: '#374151', fontWeight: '600' }}>− {totalTransferredToOwner.toLocaleString('ar-SA')} ر.س</span>
+            </div>
+
+            {remaining !== 0 && (
+              <div style={{ display: 'flex', justifyContent: 'space-between', padding: '10px 14px', background: remaining > 0 ? '#fef3c7' : '#fee2e2', borderRadius: '10px' }}>
+                <span style={{ fontSize: '13px', color: remaining > 0 ? '#92400e' : '#991b1b', fontWeight: '600' }}>
+                  {remaining > 0 ? '⏳ متبقي للتحويل' : '⚠️ تم تحويل أكثر من المستحق'}
+                </span>
+                <span style={{ fontSize: '15px', fontWeight: '700', color: remaining > 0 ? '#d97706' : '#dc2626' }}>
+                  {Math.abs(remaining).toLocaleString('ar-SA')} ر.س
+                </span>
+              </div>
+            )}
+          </div>
         </div>
 
         {/* KPIs */}
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: '10px', marginBottom: '16px' }}>
           {[
-            { label: 'إجمالي الإيرادات', val: (report?.totalRevenue || 0).toLocaleString('ar-SA') + ' ر.س', color: '#16a34a', bg: '#d1fae5' },
-            { label: 'إجمالي المصاريف', val: (report?.totalExpenses || 0).toLocaleString('ar-SA') + ' ر.س', color: '#dc2626', bg: '#fee2e2' },
-            { label: 'محوّل للمالك', val: totalTransferredToOwner.toLocaleString('ar-SA') + ' ر.س', color: '#1e40af', bg: '#dbeafe' },
-          ].map(k => (
-            <div key={k.label} style={{ background: k.bg, borderRadius: '14px', padding: '12px', textAlign: 'center' }}>
-              <div style={{ fontSize: '10px', color: '#6b7280', marginBottom: '4px' }}>{k.label}</div>
-              <div style={{ fontSize: '14px', fontWeight: '700', color: k.color }}>{k.val}</div>
+            ['إيرادات المسؤول', ((report?.rentReceivedByManager || 0) + (report?.furnishedRevenue || 0)).toLocaleString('ar-SA') + ' ر.س', '#1e40af', '#dbeafe'],
+            ['إيرادات المالك', (report?.rentReceivedByOwner || 0).toLocaleString('ar-SA') + ' ر.س', '#7c3aed', '#ede9fe'],
+            ['محوّل للمالك', totalTransferredToOwner.toLocaleString('ar-SA') + ' ر.س', '#16a34a', '#d1fae5'],
+          ].map(([l, v, c, bg]) => (
+            <div key={String(l)} style={{ background: String(bg), borderRadius: '14px', padding: '12px', textAlign: 'center' }}>
+              <div style={{ fontSize: '10px', color: '#6b7280', marginBottom: '4px' }}>{l}</div>
+              <div style={{ fontSize: '13px', fontWeight: '700', color: String(c) }}>{v}</div>
             </div>
           ))}
         </div>
 
-        {/* Transfers list */}
+        {/* سجل التحويلات */}
         <div style={{ fontSize: '14px', fontWeight: '600', color: '#374151', marginBottom: '10px' }}>سجل التحويلات</div>
         {transfers.length === 0 ? (
           <div style={{ background: '#fff', borderRadius: '16px', padding: '32px', textAlign: 'center', border: '1px solid #e5e7eb' }}>
@@ -275,7 +374,7 @@ export default function CashflowPage() {
           <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
             {transfers.map(t => (
               <div key={t.id} style={{ background: '#fff', borderRadius: '14px', padding: '14px 16px', border: '1px solid #e5e7eb', display: 'flex', alignItems: 'center', gap: '12px' }}>
-                <div style={{ width: '40px', height: '40px', borderRadius: '50%', background: t.type === 'owner_transfer' ? '#d1fae5' : '#fee2e2', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '20px', flexShrink: 0 }}>
+                <div style={{ width: '40px', height: '40px', borderRadius: '50%', background: t.type === 'owner_transfer' ? '#d1fae5' : '#fee2e2', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '18px', flexShrink: 0 }}>
                   {t.type === 'owner_transfer' ? '↑' : '↓'}
                 </div>
                 <div style={{ flex: 1 }}>
@@ -296,23 +395,19 @@ export default function CashflowPage() {
         )}
       </div>
 
-      {/* Modal */}
+      {/* Modal تحويل */}
       {showModal && (
         <div style={{ position: 'fixed', inset: '0', background: 'rgba(0,0,0,0.6)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center', zIndex: 1000 }}
           onClick={() => setShowModal(false)}>
           <div style={{ background: '#fff', borderRadius: '20px 20px 0 0', padding: '24px', width: '100%', maxWidth: '500px' }}
             onClick={e => e.stopPropagation()}>
-
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
               <h2 style={{ margin: 0, fontSize: '17px', color: '#1B4F72', fontWeight: '600' }}>تسجيل تحويل مالي</h2>
-              <button onClick={() => setShowModal(false)} style={{ border: 'none', background: '#f3f4f6', borderRadius: '50%', width: '32px', height: '32px', cursor: 'pointer', fontSize: '16px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>✕</button>
+              <button onClick={() => setShowModal(false)} style={{ border: 'none', background: '#f3f4f6', borderRadius: '50%', width: '32px', height: '32px', cursor: 'pointer', fontSize: '16px' }}>✕</button>
             </div>
-
             <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
-
-              {/* Type */}
               <div>
-                <label style={{ display: 'block', fontSize: '13px', color: '#374151', marginBottom: '8px', fontWeight: '500' }}>نوع المعاملة</label>
+                <label style={lbl}>نوع المعاملة</label>
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
                   {[['owner_transfer', 'تحويل للمالك', '↑', '#d1fae5', '#065f46'], ['manager_expense', 'مصروف مسؤول', '↓', '#fee2e2', '#991b1b']].map(([v, l, icon, bg, color]) => (
                     <button key={v} onClick={() => setForm(f => ({ ...f, type: v }))}
@@ -323,36 +418,28 @@ export default function CashflowPage() {
                   ))}
                 </div>
               </div>
-
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
                 <div>
-                  <label style={{ display: 'block', fontSize: '13px', color: '#374151', marginBottom: '6px', fontWeight: '500' }}>المبلغ (ر.س)</label>
-                  <input type="number" value={form.amount} onChange={e => setForm(f => ({ ...f, amount: e.target.value }))}
-                    style={{ width: '100%', border: '1.5px solid #e5e7eb', borderRadius: '10px', padding: '11px 14px', fontSize: '14px', boxSizing: 'border-box' }} />
+                  <label style={lbl}>المبلغ (ر.س)</label>
+                  <input type="number" value={form.amount} onChange={e => setForm(f => ({ ...f, amount: e.target.value }))} style={inp} />
                 </div>
                 <div>
-                  <label style={{ display: 'block', fontSize: '13px', color: '#374151', marginBottom: '6px', fontWeight: '500' }}>التاريخ</label>
-                  <input type="date" value={form.date} onChange={e => setForm(f => ({ ...f, date: e.target.value }))}
-                    style={{ width: '100%', border: '1.5px solid #e5e7eb', borderRadius: '10px', padding: '11px 14px', fontSize: '14px', boxSizing: 'border-box' }} />
+                  <label style={lbl}>التاريخ</label>
+                  <input type="date" value={form.date} onChange={e => setForm(f => ({ ...f, date: e.target.value }))} style={inp} />
                 </div>
               </div>
-
               <div>
-                <label style={{ display: 'block', fontSize: '13px', color: '#374151', marginBottom: '6px', fontWeight: '500' }}>طريقة التحويل</label>
-                <select value={form.paymentMethod} onChange={e => setForm(f => ({ ...f, paymentMethod: e.target.value }))}
-                  style={{ width: '100%', border: '1.5px solid #e5e7eb', borderRadius: '10px', padding: '11px 14px', fontSize: '14px', background: '#fff' }}>
+                <label style={lbl}>طريقة التحويل</label>
+                <select value={form.paymentMethod} onChange={e => setForm(f => ({ ...f, paymentMethod: e.target.value }))} style={inp}>
                   <option value="transfer">تحويل بنكي</option>
                   <option value="cash">كاش</option>
                 </select>
               </div>
-
               <div>
-                <label style={{ display: 'block', fontSize: '13px', color: '#374151', marginBottom: '6px', fontWeight: '500' }}>ملاحظات</label>
-                <input value={form.notes} onChange={e => setForm(f => ({ ...f, notes: e.target.value }))}
-                  style={{ width: '100%', border: '1.5px solid #e5e7eb', borderRadius: '10px', padding: '11px 14px', fontSize: '14px', boxSizing: 'border-box' }} />
+                <label style={lbl}>ملاحظات</label>
+                <input value={form.notes} onChange={e => setForm(f => ({ ...f, notes: e.target.value }))} style={inp} />
               </div>
             </div>
-
             <div style={{ display: 'flex', gap: '10px', marginTop: '24px' }}>
               <button onClick={saveTransfer} disabled={saving}
                 style={{ flex: 1, padding: '13px', background: '#1B4F72', color: '#fff', border: 'none', borderRadius: '12px', cursor: 'pointer', fontSize: '15px', fontWeight: '600', opacity: saving ? 0.7 : 1 }}>
@@ -369,3 +456,26 @@ export default function CashflowPage() {
     </div>
   );
 }
+
+// مكوّن صف في جدول التدفق
+function Row({ label, value, positive, tag, tagColor, tagBg }: {
+  label: string; value: number; positive: boolean;
+  tag: string; tagColor: string; tagBg: string;
+}) {
+  if (value === 0) return null;
+  return (
+    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 0', borderBottom: '1px solid #f3f4f6' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+        <span style={{ background: tagBg, color: tagColor, fontSize: '10px', fontWeight: '600', padding: '2px 8px', borderRadius: '8px' }}>{tag}</span>
+        <span style={{ fontSize: '12px', color: '#6b7280' }}>{label}</span>
+      </div>
+      <span style={{ fontSize: '13px', fontWeight: '600', color: positive ? '#16a34a' : '#dc2626' }}>
+        {positive ? '+' : '−'} {value.toLocaleString('ar-SA')} ر.س
+      </span>
+    </div>
+  );
+}
+
+const lbl: React.CSSProperties = { display: 'block', fontSize: '13px', color: '#374151', marginBottom: '6px', fontWeight: '500' };
+const inp: React.CSSProperties = { width: '100%', border: '1.5px solid #e5e7eb', borderRadius: '10px', padding: '11px 14px', fontSize: '14px', boxSizing: 'border-box', background: '#fff' };
+const selStyle: React.CSSProperties = { border: '1.5px solid #e5e7eb', borderRadius: '12px', padding: '12px 16px', fontSize: '14px', background: '#fff', width: '100%' };
