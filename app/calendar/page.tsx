@@ -2,10 +2,10 @@
 import { useEffect, useState } from 'react';
 import { onAuthStateChanged } from 'firebase/auth';
 import { auth, db } from '../../lib/firebase';
-import { collection, getDocs, query, where, doc, getDoc } from 'firebase/firestore';
+import { collection, getDocs, query, where, doc } from 'firebase/firestore';
 import { useRouter } from 'next/navigation';
+import { getCurrentUser, loadPropertiesForUser, AppUserBasic, PropertyBasic } from '../../lib/userHelpers';
 
-interface Property { id: string; name: string; }
 interface Unit { id: string; unitNumber: string; }
 interface Booking {
   id: string; unitId: string; unitNumber: string; guestName: string;
@@ -18,10 +18,9 @@ const CH_COLOR: Record<string, string> = {
   direct: '#D4AC0D', other: '#7D3C98',
 };
 const CH_LABEL: Record<string, string> = {
-  airbnb: 'Airbnb', gathern: 'Gathern', booking: 'Booking',
+  airbnb: 'Airbnb', gathern: 'Gathern', booking: 'Booking.com',
   direct: 'مباشر', other: 'أخرى',
 };
-
 
 function fmtDate(ts: any) {
   if (!ts) return '—';
@@ -29,28 +28,52 @@ function fmtDate(ts: any) {
   return `${d.getDate().toString().padStart(2, '0')}/${(d.getMonth() + 1).toString().padStart(2, '0')}`;
 }
 
+// ✅ الإصلاح الجوهري: يوم الـ checkin يُظلَّل، يوم الـ checkout لا يُظلَّل
+// المقارنة الصحيحة: checkin <= day < checkout
+function getBookingForDay(bookings: Booking[], unitId: string, year: number, month: number, day: number): Booking | null {
+  // نبني تاريخ اليوم بدون وقت
+  const dayStart = new Date(year, month - 1, day, 0, 0, 0, 0);
+  const dayEnd   = new Date(year, month - 1, day, 23, 59, 59, 999);
 
-async function loadPropertiesForUser(uid: string) {
-  const userSnap = await getDoc(doc(db, 'users', uid));
-  if (!userSnap.exists()) return [];
-  const userData = userSnap.data() as any;
-  if (userData.role === 'owner') {
-    const snap = await getDocs(query(collection(db, 'properties'), where('ownerId', '==', uid)));
-    return snap.docs.map((d: any) => ({ id: d.id, name: d.data().name }));
-  }
-  const ids: string[] = userData.propertyIds || [];
-  if (ids.length === 0) return [];
-  const results: any[] = [];
-  for (let i = 0; i < ids.length; i += 10) {
-    const chunk = ids.slice(i, i + 10);
-    const snap = await getDocs(query(collection(db, 'properties'), where('__name__', 'in', chunk)));
-    snap.docs.forEach((d: any) => results.push({ id: d.id, name: d.data().name }));
-  }
-  return results;
+  return bookings.find(b => {
+    if (b.unitId !== unitId || b.status === 'cancelled') return false;
+
+    const ci = b.checkinDate?.toDate ? b.checkinDate.toDate() : new Date(b.checkinDate);
+    const co = b.checkoutDate?.toDate ? b.checkoutDate.toDate() : new Date(b.checkoutDate);
+
+    // نُسوّي إلى منتصف الليل لتجنب مشاكل التوقيت
+    const ciDay = new Date(ci.getFullYear(), ci.getMonth(), ci.getDate());
+    const coDay = new Date(co.getFullYear(), co.getMonth(), co.getDate());
+
+    // ✅ checkin <= day < checkout  (يوم المغادرة لا يُحتسب)
+    return dayStart >= ciDay && dayStart < coDay;
+  }) || null;
 }
+
+function isCheckinDay(bookings: Booking[], unitId: string, year: number, month: number, day: number): boolean {
+  const dayStart = new Date(year, month - 1, day, 0, 0, 0, 0);
+  return bookings.some(b => {
+    if (b.unitId !== unitId || b.status === 'cancelled') return false;
+    const ci = b.checkinDate?.toDate ? b.checkinDate.toDate() : new Date(b.checkinDate);
+    const ciDay = new Date(ci.getFullYear(), ci.getMonth(), ci.getDate());
+    return dayStart.getTime() === ciDay.getTime();
+  });
+}
+
+function isCheckoutDay(bookings: Booking[], unitId: string, year: number, month: number, day: number): boolean {
+  const dayStart = new Date(year, month - 1, day, 0, 0, 0, 0);
+  return bookings.some(b => {
+    if (b.unitId !== unitId || b.status === 'cancelled') return false;
+    const co = b.checkoutDate?.toDate ? b.checkoutDate.toDate() : new Date(b.checkoutDate);
+    const coDay = new Date(co.getFullYear(), co.getMonth(), co.getDate());
+    return dayStart.getTime() === coDay.getTime();
+  });
+}
+
 export default function CalendarPage() {
   const router = useRouter();
-  const [properties, setProperties] = useState<Property[]>([]);
+  const [appUser, setAppUser] = useState<AppUserBasic | null>(null);
+  const [properties, setProperties] = useState<PropertyBasic[]>([]);
   const [propId, setPropId] = useState('');
   const [units, setUnits] = useState<Unit[]>([]);
   const [bookings, setBookings] = useState<Booking[]>([]);
@@ -62,9 +85,12 @@ export default function CalendarPage() {
   const [selected, setSelected] = useState<Booking | null>(null);
 
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, async (user) => {
+    const unsub = onAuthStateChanged(auth, async (fbUser) => {
+      if (!fbUser) { router.push('/login'); return; }
+      const user = await getCurrentUser(fbUser.uid);
       if (!user) { router.push('/login'); return; }
-      const props = await loadPropertiesForUser(user.uid);
+      setAppUser(user);
+      const props = await loadPropertiesForUser(fbUser.uid, user.role);
       setProperties(props);
       if (props.length > 0) {
         setPropId(props[0].id);
@@ -81,60 +107,27 @@ export default function CalendarPage() {
       getDocs(query(collection(db, 'bookings'), where('propertyId', '==', pid))),
     ]);
     setUnits(uSnap.docs.map(d => ({ id: d.id, ...d.data() } as Unit)));
-    setBookings(bSnap.docs.map(d => ({ id: d.id, ...d.data() } as Booking)).filter(b => b.status !== 'cancelled'));
+    setBookings(bSnap.docs.map(d => ({ id: d.id, ...d.data() } as Booking)));
   };
 
   const daysInMonth = new Date(month.year, month.month, 0).getDate();
   const days = Array.from({ length: daysInMonth }, (_, i) => i + 1);
   const today = new Date();
 
-  const prevMonth = () => setMonth(m => {
-    if (m.month === 1) return { year: m.year - 1, month: 12 };
-    return { year: m.year, month: m.month - 1 };
-  });
-  const nextMonth = () => setMonth(m => {
-    if (m.month === 12) return { year: m.year + 1, month: 1 };
-    return { year: m.year, month: m.month + 1 };
-  });
-
-  const getBookingForDay = (unitId: string, day: number): Booking | null => {
-    const d = new Date(month.year, month.month - 1, day);
-    return bookings.find(b => {
-      if (b.unitId !== unitId) return false;
-      const ci = b.checkinDate?.toDate ? b.checkinDate.toDate() : new Date(b.checkinDate);
-      const co = b.checkoutDate?.toDate ? b.checkoutDate.toDate() : new Date(b.checkoutDate);
-      return d >= ci && d < co;
-    }) || null;
-  };
-
-  const isCheckinDay = (unitId: string, day: number): boolean => {
-    const d = new Date(month.year, month.month - 1, day);
-    return bookings.some(b => {
-      if (b.unitId !== unitId) return false;
-      const ci = b.checkinDate?.toDate ? b.checkinDate.toDate() : new Date(b.checkinDate);
-      return ci.getDate() === d.getDate() && ci.getMonth() === d.getMonth() && ci.getFullYear() === d.getFullYear();
-    });
-  };
-
-  const monthRevenue = bookings
-    .filter(b => {
-      const ci = b.checkinDate?.toDate ? b.checkinDate.toDate() : new Date(b.checkinDate);
-      return ci.getMonth() + 1 === month.month && ci.getFullYear() === month.year;
-    })
-    .reduce((s, b) => s + (b.netRevenue || 0), 0);
+  const prevMonth = () => setMonth(m => m.month === 1 ? { year: m.year - 1, month: 12 } : { ...m, month: m.month - 1 });
+  const nextMonth = () => setMonth(m => m.month === 12 ? { year: m.year + 1, month: 1 } : { ...m, month: m.month + 1 });
 
   const monthBookings = bookings.filter(b => {
+    if (b.status === 'cancelled') return false;
     const ci = b.checkinDate?.toDate ? b.checkinDate.toDate() : new Date(b.checkinDate);
     return ci.getMonth() + 1 === month.month && ci.getFullYear() === month.year;
   });
+  const monthRevenue = monthBookings.reduce((s, b) => s + (b.netRevenue || 0), 0);
 
   if (loading) return (
     <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100vh', background: '#f9fafb' }}>
-      <div style={{ textAlign: 'center' }}>
-        <div style={{ width: '40px', height: '40px', border: '3px solid #1B4F72', borderTopColor: 'transparent', borderRadius: '50%', animation: 'spin 0.8s linear infinite', margin: '0 auto 12px' }} />
-        <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
-        <p style={{ color: '#6b7280', fontFamily: 'sans-serif', fontSize: '14px' }}>جارٍ التحميل...</p>
-      </div>
+      <div style={{ width: '40px', height: '40px', border: '3px solid #1B4F72', borderTopColor: 'transparent', borderRadius: '50%', animation: 'spin 0.8s linear infinite' }} />
+      <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
     </div>
   );
 
@@ -151,16 +144,16 @@ export default function CalendarPage() {
           <p style={{ margin: 0, fontSize: '12px', color: 'rgba(255,255,255,0.6)' }}>{units.length} وحدة مفروشة</p>
         </div>
         {/* Month nav */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
           <button onClick={prevMonth} style={{ background: 'rgba(255,255,255,0.15)', border: 'none', borderRadius: '8px', padding: '6px 10px', cursor: 'pointer', color: '#fff', fontSize: '16px' }}>‹</button>
-          <span style={{ color: '#fff', fontSize: '13px', minWidth: '80px', textAlign: 'center' }}>
-            {new Date(month.year, month.month - 1).toLocaleDateString('ar-SA', { month: 'short', year: 'numeric' })}
+          <span style={{ color: '#fff', fontSize: '13px', minWidth: '90px', textAlign: 'center' }}>
+            {new Date(month.year, month.month - 1).toLocaleDateString('ar-SA', { month: 'long', year: 'numeric' })}
           </span>
           <button onClick={nextMonth} style={{ background: 'rgba(255,255,255,0.15)', border: 'none', borderRadius: '8px', padding: '6px 10px', cursor: 'pointer', color: '#fff', fontSize: '16px' }}>›</button>
         </div>
       </div>
 
-      <div style={{ padding: '16px', maxWidth: '900px', margin: '0 auto' }}>
+      <div style={{ padding: '16px', maxWidth: '960px', margin: '0 auto' }}>
 
         {/* Property selector */}
         {properties.length > 1 && (
@@ -187,7 +180,7 @@ export default function CalendarPage() {
         </div>
 
         {/* Legend */}
-        <div style={{ display: 'flex', gap: '12px', marginBottom: '12px', flexWrap: 'wrap' }}>
+        <div style={{ display: 'flex', gap: '14px', marginBottom: '12px', flexWrap: 'wrap', background: '#fff', padding: '10px 14px', borderRadius: '12px', border: '1px solid #e5e7eb' }}>
           {Object.entries(CH_COLOR).map(([k, c]) => (
             <div key={k} style={{ display: 'flex', alignItems: 'center', gap: '5px', fontSize: '11px', color: '#6b7280' }}>
               <div style={{ width: '10px', height: '10px', borderRadius: '3px', background: c }} />
@@ -195,7 +188,11 @@ export default function CalendarPage() {
             </div>
           ))}
           <div style={{ display: 'flex', alignItems: 'center', gap: '5px', fontSize: '11px', color: '#6b7280' }}>
-            <div style={{ width: '10px', height: '10px', borderRadius: '3px', background: '#f3f4f6', border: '1px solid #e5e7eb' }} />
+            <div style={{ width: '10px', height: '10px', borderRadius: '50%', background: '#fff', border: '2px solid #666' }} />
+            يوم الوصول (●)
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '5px', fontSize: '11px', color: '#6b7280' }}>
+            <div style={{ width: '10px', height: '10px', background: '#f3f4f6', border: '1px solid #e5e7eb', borderRadius: '2px' }} />
             شاغر
           </div>
         </div>
@@ -207,19 +204,19 @@ export default function CalendarPage() {
             <p style={{ color: '#6b7280', fontSize: '14px', margin: 0 }}>لا توجد وحدات مفروشة — أضف وحدات من صفحة الوحدات</p>
           </div>
         ) : (
-          <div style={{ background: '#fff', borderRadius: '16px', border: '1px solid #e5e7eb', overflow: 'hidden' }}>
+          <div style={{ background: '#fff', borderRadius: '16px', border: '1px solid #e5e7eb', overflow: 'hidden', marginBottom: '16px' }}>
             <div style={{ overflowX: 'auto' }}>
-              <div style={{ minWidth: `${80 + daysInMonth * 26}px` }}>
+              <div style={{ minWidth: `${90 + daysInMonth * 28}px` }}>
 
                 {/* Day headers */}
-                <div style={{ display: 'grid', gridTemplateColumns: `80px repeat(${daysInMonth}, 24px)`, gap: '2px', padding: '8px', borderBottom: '1px solid #f3f4f6', background: '#f9fafb' }}>
-                  <div style={{ fontSize: '10px', color: '#9ca3af', display: 'flex', alignItems: 'center', paddingRight: '4px' }}>الوحدة</div>
+                <div style={{ display: 'grid', gridTemplateColumns: `90px repeat(${daysInMonth}, 26px)`, gap: '2px', padding: '8px', borderBottom: '1px solid #f3f4f6', background: '#f9fafb', alignItems: 'center' }}>
+                  <div style={{ fontSize: '10px', color: '#9ca3af', paddingRight: '6px' }}>الوحدة</div>
                   {days.map(d => {
                     const isToday = today.getDate() === d && today.getMonth() + 1 === month.month && today.getFullYear() === month.year;
                     const dow = new Date(month.year, month.month - 1, d).getDay();
                     const isFri = dow === 5;
                     return (
-                      <div key={d} style={{ textAlign: 'center', fontSize: '10px', color: isToday ? '#1B4F72' : isFri ? '#dc2626' : '#9ca3af', fontWeight: isToday ? '700' : '400', background: isToday ? '#dbeafe' : 'transparent', borderRadius: '4px', padding: '2px 0' }}>
+                      <div key={d} style={{ textAlign: 'center', fontSize: '10px', color: isToday ? '#fff' : isFri ? '#dc2626' : '#9ca3af', fontWeight: isToday ? '700' : '400', background: isToday ? '#1B4F72' : 'transparent', borderRadius: '4px', padding: '2px 0' }}>
                         {d}
                       </div>
                     );
@@ -228,31 +225,42 @@ export default function CalendarPage() {
 
                 {/* Unit rows */}
                 {units.map(unit => (
-                  <div key={unit.id} style={{ display: 'grid', gridTemplateColumns: `80px repeat(${daysInMonth}, 24px)`, gap: '2px', padding: '4px 8px', borderBottom: '1px solid #f9fafb' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', paddingRight: '4px' }}>
+                  <div key={unit.id} style={{ display: 'grid', gridTemplateColumns: `90px repeat(${daysInMonth}, 26px)`, gap: '2px', padding: '4px 8px', borderBottom: '1px solid #f9fafb', alignItems: 'center' }}>
+                    <div style={{ paddingRight: '6px' }}>
                       <span style={{ background: '#1B4F72', color: '#fff', borderRadius: '6px', padding: '3px 8px', fontSize: '11px', fontWeight: '600' }}>
                         {unit.unitNumber}
                       </span>
                     </div>
                     {days.map(d => {
-                      const booking = getBookingForDay(unit.id, d);
-                      const isCI = booking && isCheckinDay(unit.id, d);
+                      const booking = getBookingForDay(bookings, unit.id, month.year, month.month, d);
+                      const isCI = isCheckinDay(bookings, unit.id, month.year, month.month, d);
+                      const isCO = isCheckoutDay(bookings, unit.id, month.year, month.month, d);
                       const color = booking ? CH_COLOR[booking.channel] || '#888' : null;
+
                       return (
                         <div
                           key={d}
                           onClick={() => booking ? setSelected(booking) : null}
+                          title={
+                            booking
+                              ? `${booking.guestName} (${CH_LABEL[booking.channel]})${isCI ? ' — يوم الوصول' : isCO ? ' — يوم المغادرة' : ''}`
+                              : isCO ? 'يوم المغادرة (شاغر)' : ''
+                          }
                           style={{
-                            height: '24px', borderRadius: '4px', cursor: booking ? 'pointer' : 'default',
+                            height: '26px',
+                            borderRadius: isCI ? '6px 2px 2px 6px' : isCO ? '2px 6px 6px 2px' : '2px',
+                            cursor: booking ? 'pointer' : 'default',
                             background: color || '#f3f4f6',
                             border: color ? 'none' : '1px solid #e5e7eb',
-                            opacity: 0.9,
                             position: 'relative',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
                           }}
-                          title={booking ? `${booking.guestName} (${CH_LABEL[booking.channel]})` : ''}
                         >
-                          {isCI && (
-                            <div style={{ position: 'absolute', top: '2px', right: '2px', width: '6px', height: '6px', background: '#fff', borderRadius: '50%', opacity: 0.8 }} />
+                          {/* نقطة بيضاء في يوم الوصول */}
+                          {isCI && color && (
+                            <div style={{ width: '6px', height: '6px', background: '#fff', borderRadius: '50%', opacity: 0.9 }} />
                           )}
                         </div>
                       );
@@ -264,14 +272,14 @@ export default function CalendarPage() {
           </div>
         )}
 
-        {/* This month bookings list */}
+        {/* قائمة حجوزات الشهر */}
         {monthBookings.length > 0 && (
-          <div style={{ marginTop: '16px' }}>
+          <div>
             <div style={{ fontSize: '14px', fontWeight: '600', color: '#374151', marginBottom: '10px' }}>
               حجوزات {new Date(month.year, month.month - 1).toLocaleDateString('ar-SA', { month: 'long' })}
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-              {monthBookings.map(b => {
+              {monthBookings.sort((a, b) => (a.checkinDate?.seconds || 0) - (b.checkinDate?.seconds || 0)).map(b => {
                 const ch = CH_COLOR[b.channel] || '#888';
                 return (
                   <div key={b.id} onClick={() => setSelected(b)}
@@ -280,7 +288,9 @@ export default function CalendarPage() {
                     <div style={{ background: '#1B4F72', color: '#fff', borderRadius: '6px', padding: '2px 8px', fontSize: '12px', fontWeight: '600' }}>{b.unitNumber}</div>
                     <div style={{ flex: 1 }}>
                       <div style={{ fontSize: '14px', fontWeight: '500', color: '#111827' }}>{b.guestName}</div>
-                      <div style={{ fontSize: '11px', color: '#9ca3af' }}>{fmtDate(b.checkinDate)} → {fmtDate(b.checkoutDate)} · {b.nights} ليلة</div>
+                      <div style={{ fontSize: '11px', color: '#9ca3af' }}>
+                        {fmtDate(b.checkinDate)} ← وصول · {fmtDate(b.checkoutDate)} ← مغادرة · {b.nights} ليلة
+                      </div>
                     </div>
                     <div style={{ fontSize: '14px', fontWeight: '700', color: '#16a34a' }}>{b.netRevenue?.toLocaleString('ar-SA')} ر.س</div>
                   </div>
@@ -305,9 +315,9 @@ export default function CalendarPage() {
               ['الضيف', selected.guestName],
               ['الشقة', selected.unitNumber],
               ['المنصة', CH_LABEL[selected.channel] || selected.channel],
-              ['الوصول', fmtDate(selected.checkinDate)],
-              ['المغادرة', fmtDate(selected.checkoutDate)],
-              ['الليالي', selected.nights + ' ليلة'],
+              ['تاريخ الوصول', fmtDate(selected.checkinDate)],
+              ['تاريخ المغادرة', fmtDate(selected.checkoutDate)],
+              ['عدد الليالي', selected.nights + ' ليلة'],
               ['صافي الإيراد', (selected.netRevenue || 0).toLocaleString('ar-SA') + ' ر.س'],
             ].map(([l, v]) => (
               <div key={String(l)} style={{ display: 'flex', justifyContent: 'space-between', padding: '10px 0', borderBottom: '1px solid #f3f4f6' }}>
@@ -315,6 +325,9 @@ export default function CalendarPage() {
                 <span style={{ fontSize: '14px', fontWeight: '600', color: '#111827' }}>{v}</span>
               </div>
             ))}
+            <button onClick={() => setSelected(null)} style={{ width: '100%', marginTop: '16px', padding: '12px', background: '#1B4F72', color: '#fff', border: 'none', borderRadius: '10px', cursor: 'pointer', fontSize: '14px' }}>
+              إغلاق
+            </button>
           </div>
         </div>
       )}
