@@ -3,12 +3,12 @@ import { useEffect, useState } from 'react';
 import { onAuthStateChanged } from 'firebase/auth';
 import { auth, db } from '../../lib/firebase';
 import {
-  collection, getDocs, addDoc, updateDoc,
-  doc, getDoc, query, where, serverTimestamp, Timestamp
+  collection, getDocs, addDoc, updateDoc, deleteDoc,
+  doc, query, where, serverTimestamp, Timestamp, getDoc
 } from 'firebase/firestore';
 import { useRouter } from 'next/navigation';
+import { getCurrentUser, loadPropertiesForUser, AppUserBasic, PropertyBasic } from '../../lib/userHelpers';
 
-interface Property { id: string; name: string; }
 interface Tenant {
   id: string; propertyId: string; unitId: string; unitNumber: string;
   name: string; phone: string; idNumber: string; contractNumber: string;
@@ -19,35 +19,12 @@ interface Payment {
   id: string; tenantId: string; unitNumber: string; tenantName: string;
   amountDue: number; amountPaid: number; balance: number;
   paidDate: any; paymentMethod: string; referenceNumber: string;
+  receivedBy: string; // 'owner' | 'manager'
+  deleteRequested?: boolean;
 }
 
-const CYCLE: Record<string, string> = {
-  monthly: 'شهري', quarterly: 'ربع سنوي', semi: 'نصف سنوي', annual: 'سنوي'
-};
-const METHOD: Record<string, string> = {
-  transfer: 'تحويل', cash: 'كاش', ejar: 'إيجار', stc_pay: 'STC Pay'
-};
-
-async function loadPropertiesForUser(uid: string): Promise<Property[]> {
-  const userSnap = await getDoc(doc(db, 'users', uid));
-  if (!userSnap.exists()) return [];
-  const userData = userSnap.data() as any;
-
-  if (userData.role === 'owner') {
-    const snap = await getDocs(query(collection(db, 'properties'), where('ownerId', '==', uid)));
-    return snap.docs.map(d => ({ id: d.id, name: (d.data() as any).name }));
-  }
-
-  const ids: string[] = userData.propertyIds || [];
-  if (ids.length === 0) return [];
-  const results: Property[] = [];
-  for (let i = 0; i < ids.length; i += 10) {
-    const chunk = ids.slice(i, i + 10);
-    const snap = await getDocs(query(collection(db, 'properties'), where('__name__', 'in', chunk)));
-    snap.docs.forEach(d => results.push({ id: d.id, name: (d.data() as any).name }));
-  }
-  return results;
-}
+const CYCLE: Record<string, string> = { monthly: 'شهري', quarterly: 'ربع سنوي', semi: 'نصف سنوي', annual: 'سنوي' };
+const METHOD: Record<string, string> = { transfer: 'تحويل', cash: 'كاش', ejar: 'إيجار', stc_pay: 'STC Pay' };
 
 function fmtDate(ts: any) {
   if (!ts) return '—';
@@ -57,7 +34,8 @@ function fmtDate(ts: any) {
 
 export default function MonthlyPage() {
   const router = useRouter();
-  const [properties, setProperties] = useState<Property[]>([]);
+  const [appUser, setAppUser] = useState<AppUserBasic | null>(null);
+  const [properties, setProperties] = useState<PropertyBasic[]>([]);
   const [propId, setPropId] = useState('');
   const [tenants, setTenants] = useState<Tenant[]>([]);
   const [payments, setPayments] = useState<Payment[]>([]);
@@ -67,20 +45,31 @@ export default function MonthlyPage() {
   const [showPay, setShowPay] = useState<Tenant | null>(null);
   const [editTenant, setEditTenant] = useState<Tenant | null>(null);
   const [saving, setSaving] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<Payment | null>(null);
+  const [deleteReason, setDeleteReason] = useState('');
+
+  const canDelete = appUser?.role === 'owner';
+  const canAddTenant = appUser?.role === 'owner' || appUser?.role === 'manager';
+
   const [tf, setTf] = useState({
     unitNumber: '', name: '', phone: '', idNumber: '', contractNumber: '',
-    rentAmount: '', contractStart: '', contractEnd: '',
-    paymentCycle: 'monthly', status: 'active'
+    rentAmount: '', contractStart: '', contractEnd: '', paymentCycle: 'monthly', status: 'active',
   });
   const [pf, setPf] = useState({
     amountDue: '', amountPaid: '', paidDate: '',
-    paymentMethod: 'transfer', referenceNumber: ''
+    paymentMethod: 'transfer', referenceNumber: '',
+    receivedBy: 'manager', // ← الجديد: مستلم المبلغ
   });
 
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, async (user) => {
+    const unsub = onAuthStateChanged(auth, async (fbUser) => {
+      if (!fbUser) { router.push('/login'); return; }
+      const user = await getCurrentUser(fbUser.uid);
       if (!user) { router.push('/login'); return; }
-      const props = await loadPropertiesForUser(user.uid);
+      setAppUser(user);
+      // تحديد المستلم الافتراضي حسب دور المستخدم
+      setPf(f => ({ ...f, receivedBy: user.role === 'owner' ? 'owner' : 'manager' }));
+      const props = await loadPropertiesForUser(fbUser.uid, user.role);
       setProperties(props);
       if (props.length > 0) {
         setPropId(props[0].id);
@@ -101,7 +90,7 @@ export default function MonthlyPage() {
   };
 
   const saveTenant = async () => {
-    if (!tf.unitNumber || !tf.name || !propId) return;
+    if (!tf.unitNumber || !tf.name || !propId || !canAddTenant) return;
     setSaving(true);
     try {
       const data = {
@@ -137,24 +126,62 @@ export default function MonthlyPage() {
         balance: Number(pf.amountDue || showPay.rentAmount) - Number(pf.amountPaid),
         paymentMethod: pf.paymentMethod,
         referenceNumber: pf.referenceNumber,
+        receivedBy: pf.receivedBy,        // ← حقل مستلم المبلغ
         paidDate: pf.paidDate ? Timestamp.fromDate(new Date(pf.paidDate)) : Timestamp.now(),
-        receivedBy: auth.currentUser?.uid,
+        recordedBy: auth.currentUser?.uid,
         createdAt: serverTimestamp(),
       });
       await loadData(propId);
       setShowPay(null);
+      setPf({ amountDue: '', amountPaid: '', paidDate: '', paymentMethod: 'transfer', referenceNumber: '', receivedBy: appUser?.role === 'owner' ? 'owner' : 'manager' });
+    } catch (e) { alert('حدث خطأ'); }
+    setSaving(false);
+  };
+
+  // المالك يحذف مباشرة
+  const handleDeleteOwner = async (id: string) => {
+    if (!confirm('هل أنت متأكد من حذف هذه الدفعة؟')) return;
+    await deleteDoc(doc(db, 'rentPayments', id));
+    await loadData(propId);
+  };
+
+  // غير المالك يرسل طلب حذف
+  const sendDeleteRequest = async () => {
+    if (!deleteTarget) return;
+    setSaving(true);
+    try {
+      await addDoc(collection(db, 'deleteRequests'), {
+        type: 'rentPayment',
+        documentId: deleteTarget.id,
+        propertyId: propId,
+        requestedBy: auth.currentUser?.uid,
+        requestedByName: appUser?.name,
+        requestedByRole: appUser?.role,
+        reason: deleteReason,
+        status: 'pending',
+        paymentDetails: {
+          tenantName: deleteTarget.tenantName,
+          unitNumber: deleteTarget.unitNumber,
+          amountPaid: deleteTarget.amountPaid,
+          paidDate: deleteTarget.paidDate,
+        },
+        createdAt: serverTimestamp(),
+      });
+      await updateDoc(doc(db, 'rentPayments', deleteTarget.id), {
+        deleteRequested: true,
+        deleteRequestedBy: appUser?.name,
+      });
+      await loadData(propId);
+      setDeleteTarget(null);
+      setDeleteReason('');
+      alert('✅ تم إرسال طلب الحذف للمالك');
     } catch (e) { alert('حدث خطأ'); }
     setSaving(false);
   };
 
   const openEdit = (t: Tenant) => {
     setEditTenant(t);
-    setTf({
-      unitNumber: t.unitNumber, name: t.name, phone: t.phone || '',
-      idNumber: t.idNumber || '', contractNumber: t.contractNumber || '',
-      rentAmount: String(t.rentAmount), contractStart: '', contractEnd: '',
-      paymentCycle: t.paymentCycle, status: t.status,
-    });
+    setTf({ unitNumber: t.unitNumber, name: t.name, phone: t.phone || '', idNumber: t.idNumber || '', contractNumber: t.contractNumber || '', rentAmount: String(t.rentAmount), contractStart: '', contractEnd: '', paymentCycle: t.paymentCycle, status: t.status });
     setShowTenant(true);
   };
 
@@ -164,13 +191,12 @@ export default function MonthlyPage() {
     return bal > 0;
   });
 
+  const pendingDeletes = payments.filter(p => p.deleteRequested).length;
+
   if (loading) return (
-    <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100vh', background: '#f9fafb' }}>
-      <div style={{ textAlign: 'center' }}>
-        <div style={{ width: '40px', height: '40px', border: '3px solid #1B4F72', borderTopColor: 'transparent', borderRadius: '50%', animation: 'spin 0.8s linear infinite', margin: '0 auto 12px' }} />
-        <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
-        <p style={{ color: '#6b7280', fontFamily: 'sans-serif', fontSize: '14px' }}>جارٍ التحميل...</p>
-      </div>
+    <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100vh' }}>
+      <div style={{ width: '40px', height: '40px', border: '3px solid #1B4F72', borderTopColor: 'transparent', borderRadius: '50%', animation: 'spin 0.8s linear infinite' }} />
+      <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
     </div>
   );
 
@@ -186,6 +212,7 @@ export default function MonthlyPage() {
           <h1 style={{ margin: 0, fontSize: '17px', fontWeight: '600', color: '#fff' }}>الإيجار الشهري</h1>
           <p style={{ margin: 0, fontSize: '12px', color: 'rgba(255,255,255,0.6)' }}>
             {tenants.filter(t => t.status === 'active').length} مستأجر نشط
+            {pendingDeletes > 0 && ` · ${pendingDeletes} طلب حذف`}
           </p>
         </div>
         <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
@@ -195,14 +222,23 @@ export default function MonthlyPage() {
               {properties.map(p => <option key={p.id} value={p.id} style={{ color: '#000' }}>{p.name}</option>)}
             </select>
           )}
-          <button onClick={() => { setEditTenant(null); setTf({ unitNumber: '', name: '', phone: '', idNumber: '', contractNumber: '', rentAmount: '', contractStart: '', contractEnd: '', paymentCycle: 'monthly', status: 'active' }); setShowTenant(true); }}
-            style={{ background: '#D4AC0D', border: 'none', borderRadius: '10px', padding: '10px 14px', cursor: 'pointer', color: '#fff', fontSize: '13px', fontWeight: '600' }}>
-            + إضافة
-          </button>
+          {canAddTenant && (
+            <button onClick={() => { setEditTenant(null); setTf({ unitNumber: '', name: '', phone: '', idNumber: '', contractNumber: '', rentAmount: '', contractStart: '', contractEnd: '', paymentCycle: 'monthly', status: 'active' }); setShowTenant(true); }}
+              style={{ background: '#D4AC0D', border: 'none', borderRadius: '10px', padding: '10px 14px', cursor: 'pointer', color: '#fff', fontSize: '13px', fontWeight: '600' }}>
+              + إضافة
+            </button>
+          )}
         </div>
       </div>
 
       <div style={{ padding: '16px', maxWidth: '800px', margin: '0 auto' }}>
+
+        {/* تنبيه طلبات الحذف للمالك */}
+        {canDelete && pendingDeletes > 0 && (
+          <div style={{ background: '#fef3c7', border: '1px solid #fbbf24', borderRadius: '12px', padding: '12px 16px', marginBottom: '16px', fontSize: '13px', color: '#92400e' }}>
+            ⏳ {pendingDeletes} طلب حذف دفعة معلق — راجع تبويب "الدفعات"
+          </div>
+        )}
 
         {/* Tabs */}
         <div style={{ display: 'flex', background: '#fff', borderRadius: '12px', padding: '4px', marginBottom: '16px', border: '1px solid #e5e7eb' }}>
@@ -220,7 +256,7 @@ export default function MonthlyPage() {
             <div style={{ background: '#fff', borderRadius: '16px', padding: '40px', textAlign: 'center', border: '1px solid #e5e7eb' }}>
               <div style={{ fontSize: '48px', marginBottom: '12px' }}>📋</div>
               <p style={{ color: '#6b7280', fontSize: '14px', margin: '0 0 16px' }}>لا يوجد مستأجرون</p>
-              <button onClick={() => setShowTenant(true)} style={btnPrimary}>+ إضافة مستأجر</button>
+              {canAddTenant && <button onClick={() => setShowTenant(true)} style={btnPrimary}>+ إضافة مستأجر</button>}
             </div>
           ) : (
             <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
@@ -251,10 +287,12 @@ export default function MonthlyPage() {
                       style={{ flex: 1, padding: '9px', background: '#1B4F72', color: '#fff', border: 'none', borderRadius: '8px', cursor: 'pointer', fontSize: '13px', fontWeight: '600' }}>
                       تسجيل دفعة
                     </button>
-                    <button onClick={() => openEdit(t)}
-                      style={{ padding: '9px 16px', background: '#fff', border: '1px solid #e5e7eb', borderRadius: '8px', cursor: 'pointer', fontSize: '13px' }}>
-                      تعديل
-                    </button>
+                    {canAddTenant && (
+                      <button onClick={() => openEdit(t)}
+                        style={{ padding: '9px 16px', background: '#fff', border: '1px solid #e5e7eb', borderRadius: '8px', cursor: 'pointer', fontSize: '13px' }}>
+                        تعديل
+                      </button>
+                    )}
                   </div>
                 </div>
               ))}
@@ -272,15 +310,45 @@ export default function MonthlyPage() {
           ) : (
             <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
               {payments.sort((a, b) => (b.paidDate?.seconds || 0) - (a.paidDate?.seconds || 0)).map(p => (
-                <div key={p.id} style={{ background: '#fff', borderRadius: '14px', padding: '14px 16px', border: '1px solid #e5e7eb', display: 'flex', alignItems: 'center', gap: '12px' }}>
+                <div key={p.id} style={{ background: p.deleteRequested ? '#fff7ed' : '#fff', borderRadius: '14px', padding: '14px 16px', border: `1px solid ${p.deleteRequested ? '#fbbf24' : '#e5e7eb'}`, display: 'flex', alignItems: 'center', gap: '12px' }}>
                   <div style={{ background: '#1B4F72', color: '#fff', borderRadius: '8px', padding: '4px 8px', fontSize: '12px', fontWeight: '700', flexShrink: 0 }}>{p.unitNumber}</div>
                   <div style={{ flex: 1 }}>
                     <div style={{ fontSize: '14px', fontWeight: '600', color: '#111827' }}>{p.tenantName}</div>
-                    <div style={{ fontSize: '11px', color: '#9ca3af' }}>{fmtDate(p.paidDate)} · {METHOD[p.paymentMethod] || p.paymentMethod}</div>
+                    <div style={{ fontSize: '11px', color: '#9ca3af', display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                      <span>{fmtDate(p.paidDate)}</span>
+                      <span>· {METHOD[p.paymentMethod] || p.paymentMethod}</span>
+                      {/* مستلم المبلغ */}
+                      <span style={{ background: p.receivedBy === 'owner' ? '#fef3c7' : '#dbeafe', color: p.receivedBy === 'owner' ? '#92400e' : '#1e40af', padding: '0px 6px', borderRadius: '6px', fontSize: '10px' }}>
+                        استلمه: {p.receivedBy === 'owner' ? 'المالك' : 'المسؤول'}
+                      </span>
+                    </div>
                   </div>
-                  <div style={{ textAlign: 'left' }}>
+                  <div style={{ textAlign: 'left', flexShrink: 0 }}>
                     <div style={{ fontSize: '15px', fontWeight: '700', color: '#16a34a' }}>{p.amountPaid?.toLocaleString('ar-SA')} ر.س</div>
                     {p.balance > 0 && <div style={{ fontSize: '11px', color: '#dc2626' }}>متبقي: {p.balance?.toLocaleString('ar-SA')}</div>}
+                  </div>
+                  <div>
+                    {p.deleteRequested ? (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', alignItems: 'flex-end' }}>
+                        <span style={{ fontSize: '10px', color: '#d97706', background: '#fef3c7', padding: '2px 6px', borderRadius: '6px' }}>🔴 طلب حذف</span>
+                        {canDelete && (
+                          <button onClick={() => handleDeleteOwner(p.id)}
+                            style={{ padding: '3px 8px', border: '1px solid #fca5a5', borderRadius: '6px', background: '#fff', cursor: 'pointer', fontSize: '11px', color: '#dc2626' }}>
+                            تأكيد
+                          </button>
+                        )}
+                      </div>
+                    ) : canDelete ? (
+                      <button onClick={() => handleDeleteOwner(p.id)}
+                        style={{ padding: '4px 10px', border: '1px solid #fca5a5', borderRadius: '6px', background: '#fff', cursor: 'pointer', fontSize: '11px', color: '#dc2626' }}>
+                        حذف
+                      </button>
+                    ) : (
+                      <button onClick={() => setDeleteTarget(p)}
+                        style={{ padding: '4px 10px', border: '1px solid #d1d5db', borderRadius: '6px', background: '#fff', cursor: 'pointer', fontSize: '11px', color: '#6b7280' }}>
+                        🔒 طلب حذف
+                      </button>
+                    )}
                   </div>
                 </div>
               ))}
@@ -312,7 +380,7 @@ export default function MonthlyPage() {
                 {arrears.map(t => {
                   const bal = payments.filter(p => p.tenantId === t.id).reduce((s, p) => s + (p.balance || 0), 0);
                   return (
-                    <div key={t.id} style={{ background: '#fff', borderRadius: '14px', padding: '16px', border: '1px solid #fca5a5',  }}>
+                    <div key={t.id} style={{ background: '#fff', borderRadius: '14px', padding: '16px', border: '1px solid #fca5a5' }}>
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
                           <div style={{ background: '#dc2626', color: '#fff', borderRadius: '8px', padding: '6px 10px', fontSize: '14px', fontWeight: '700' }}>{t.unitNumber}</div>
@@ -337,7 +405,7 @@ export default function MonthlyPage() {
       </div>
 
       {/* Tenant Modal */}
-      {showTenant && (
+      {showTenant && canAddTenant && (
         <div style={{ position: 'fixed', inset: '0', background: 'rgba(0,0,0,0.6)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center', zIndex: 1000 }}
           onClick={() => setShowTenant(false)}>
           <div style={{ background: '#fff', borderRadius: '20px 20px 0 0', padding: '24px', width: '100%', maxWidth: '500px', maxHeight: '90vh', overflowY: 'auto' }}
@@ -346,16 +414,14 @@ export default function MonthlyPage() {
               <h2 style={{ margin: 0, fontSize: '17px', color: '#1B4F72', fontWeight: '600' }}>{editTenant ? 'تعديل المستأجر' : 'إضافة مستأجر جديد'}</h2>
               <button onClick={() => setShowTenant(false)} style={{ border: 'none', background: '#f3f4f6', borderRadius: '50%', width: '32px', height: '32px', cursor: 'pointer', fontSize: '16px' }}>✕</button>
             </div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
-                {[['unitNumber', 'رقم الشقة', 'text'], ['name', 'اسم المستأجر', 'text'], ['phone', 'رقم الجوال', 'text'], ['idNumber', 'رقم الهوية', 'text'], ['contractNumber', 'رقم العقد', 'text'], ['rentAmount', 'الإيجار (ر.س)', 'number'], ['contractStart', 'بداية العقد', 'date'], ['contractEnd', 'نهاية العقد', 'date']].map(([k, l, t]) => (
-                  <div key={k}>
-                    <label style={{ display: 'block', fontSize: '12px', color: '#374151', marginBottom: '4px', fontWeight: '500' }}>{l}</label>
-                    <input type={t} value={(tf as any)[k]} onChange={e => setTf(f => ({ ...f, [k]: e.target.value }))}
-                      style={{ width: '100%', border: '1.5px solid #e5e7eb', borderRadius: '10px', padding: '10px 12px', fontSize: '14px', boxSizing: 'border-box' }} />
-                  </div>
-                ))}
-              </div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
+              {[['unitNumber', 'رقم الشقة', 'text'], ['name', 'اسم المستأجر', 'text'], ['phone', 'رقم الجوال', 'text'], ['idNumber', 'رقم الهوية', 'text'], ['contractNumber', 'رقم العقد', 'text'], ['rentAmount', 'الإيجار (ر.س)', 'number'], ['contractStart', 'بداية العقد', 'date'], ['contractEnd', 'نهاية العقد', 'date']].map(([k, l, t]) => (
+                <div key={k}>
+                  <label style={{ display: 'block', fontSize: '12px', color: '#374151', marginBottom: '4px', fontWeight: '500' }}>{l}</label>
+                  <input type={t} value={(tf as any)[k]} onChange={e => setTf(f => ({ ...f, [k]: e.target.value }))}
+                    style={{ width: '100%', border: '1.5px solid #e5e7eb', borderRadius: '10px', padding: '10px 12px', fontSize: '14px', boxSizing: 'border-box' }} />
+                </div>
+              ))}
               <div>
                 <label style={{ display: 'block', fontSize: '12px', color: '#374151', marginBottom: '4px', fontWeight: '500' }}>دورة الدفع</label>
                 <select value={tf.paymentCycle} onChange={e => setTf(f => ({ ...f, paymentCycle: e.target.value }))}
@@ -385,33 +451,29 @@ export default function MonthlyPage() {
       {showPay && (
         <div style={{ position: 'fixed', inset: '0', background: 'rgba(0,0,0,0.6)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center', zIndex: 1000 }}
           onClick={() => setShowPay(null)}>
-          <div style={{ background: '#fff', borderRadius: '20px 20px 0 0', padding: '24px', width: '100%', maxWidth: '500px' }}
+          <div style={{ background: '#fff', borderRadius: '20px 20px 0 0', padding: '24px', width: '100%', maxWidth: '500px', maxHeight: '90vh', overflowY: 'auto' }}
             onClick={e => e.stopPropagation()}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
-              <h2 style={{ margin: 0, fontSize: '17px', color: '#1B4F72', fontWeight: '600' }}>دفعة — شقة {showPay.unitNumber} ({showPay.name})</h2>
+              <h2 style={{ margin: 0, fontSize: '17px', color: '#1B4F72', fontWeight: '600' }}>دفعة — شقة {showPay.unitNumber}</h2>
               <button onClick={() => setShowPay(null)} style={{ border: 'none', background: '#f3f4f6', borderRadius: '50%', width: '32px', height: '32px', cursor: 'pointer', fontSize: '16px' }}>✕</button>
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
                 <div>
-                  <label style={{ display: 'block', fontSize: '12px', color: '#374151', marginBottom: '4px', fontWeight: '500' }}>المبلغ المطلوب (ر.س)</label>
-                  <input type="number" value={pf.amountDue || showPay.rentAmount} onChange={e => setPf(f => ({ ...f, amountDue: e.target.value }))}
-                    style={{ width: '100%', border: '1.5px solid #e5e7eb', borderRadius: '10px', padding: '10px 12px', fontSize: '14px', boxSizing: 'border-box' }} />
+                  <label style={lbl}>المبلغ المطلوب (ر.س)</label>
+                  <input type="number" value={pf.amountDue || showPay.rentAmount} onChange={e => setPf(f => ({ ...f, amountDue: e.target.value }))} style={inp} />
                 </div>
                 <div>
-                  <label style={{ display: 'block', fontSize: '12px', color: '#374151', marginBottom: '4px', fontWeight: '500' }}>المبلغ المدفوع (ر.س)</label>
-                  <input type="number" value={pf.amountPaid} onChange={e => setPf(f => ({ ...f, amountPaid: e.target.value }))}
-                    style={{ width: '100%', border: '1.5px solid #e5e7eb', borderRadius: '10px', padding: '10px 12px', fontSize: '14px', boxSizing: 'border-box' }} />
+                  <label style={lbl}>المبلغ المدفوع (ر.س)</label>
+                  <input type="number" value={pf.amountPaid} onChange={e => setPf(f => ({ ...f, amountPaid: e.target.value }))} style={inp} />
                 </div>
                 <div>
-                  <label style={{ display: 'block', fontSize: '12px', color: '#374151', marginBottom: '4px', fontWeight: '500' }}>تاريخ الدفع</label>
-                  <input type="date" value={pf.paidDate} onChange={e => setPf(f => ({ ...f, paidDate: e.target.value }))}
-                    style={{ width: '100%', border: '1.5px solid #e5e7eb', borderRadius: '10px', padding: '10px 12px', fontSize: '14px', boxSizing: 'border-box' }} />
+                  <label style={lbl}>تاريخ الدفع</label>
+                  <input type="date" value={pf.paidDate} onChange={e => setPf(f => ({ ...f, paidDate: e.target.value }))} style={inp} />
                 </div>
                 <div>
-                  <label style={{ display: 'block', fontSize: '12px', color: '#374151', marginBottom: '4px', fontWeight: '500' }}>طريقة الدفع</label>
-                  <select value={pf.paymentMethod} onChange={e => setPf(f => ({ ...f, paymentMethod: e.target.value }))}
-                    style={{ width: '100%', border: '1.5px solid #e5e7eb', borderRadius: '10px', padding: '10px 12px', fontSize: '14px', background: '#fff' }}>
+                  <label style={lbl}>طريقة الدفع</label>
+                  <select value={pf.paymentMethod} onChange={e => setPf(f => ({ ...f, paymentMethod: e.target.value }))} style={inp}>
                     <option value="transfer">تحويل بنكي</option>
                     <option value="cash">كاش</option>
                     <option value="ejar">منصة إيجار</option>
@@ -419,10 +481,29 @@ export default function MonthlyPage() {
                   </select>
                 </div>
               </div>
+
+              {/* ← الجديد: مستلم المبلغ */}
               <div>
-                <label style={{ display: 'block', fontSize: '12px', color: '#374151', marginBottom: '4px', fontWeight: '500' }}>رقم المرجع</label>
-                <input value={pf.referenceNumber} onChange={e => setPf(f => ({ ...f, referenceNumber: e.target.value }))}
-                  style={{ width: '100%', border: '1.5px solid #e5e7eb', borderRadius: '10px', padding: '10px 12px', fontSize: '14px', boxSizing: 'border-box' }} />
+                <label style={{ display: 'block', fontSize: '13px', color: '#374151', marginBottom: '8px', fontWeight: '600' }}>
+                  💰 مستلم المبلغ
+                </label>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
+                  {[
+                    { val: 'manager', label: 'مسؤول العقار', icon: '👤', color: '#1e40af', bg: '#dbeafe' },
+                    { val: 'owner',   label: 'المالك',        icon: '👑', color: '#7c3aed', bg: '#ede9fe' },
+                  ].map(opt => (
+                    <button key={opt.val} onClick={() => setPf(f => ({ ...f, receivedBy: opt.val }))}
+                      style={{ padding: '12px', border: `2px solid ${pf.receivedBy === opt.val ? opt.color : '#e5e7eb'}`, borderRadius: '12px', background: pf.receivedBy === opt.val ? opt.bg : '#fff', cursor: 'pointer', textAlign: 'center', transition: 'all 0.15s' }}>
+                      <div style={{ fontSize: '20px', marginBottom: '4px' }}>{opt.icon}</div>
+                      <div style={{ fontSize: '13px', fontWeight: '600', color: pf.receivedBy === opt.val ? opt.color : '#374151' }}>{opt.label}</div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div>
+                <label style={lbl}>رقم المرجع</label>
+                <input value={pf.referenceNumber} onChange={e => setPf(f => ({ ...f, referenceNumber: e.target.value }))} style={inp} />
               </div>
             </div>
             <div style={{ display: 'flex', gap: '10px', marginTop: '20px' }}>
@@ -438,11 +519,40 @@ export default function MonthlyPage() {
           </div>
         </div>
       )}
+
+      {/* Modal طلب حذف الدفعة */}
+      {deleteTarget && !canDelete && (
+        <div style={{ position: 'fixed', inset: '0', background: 'rgba(0,0,0,0.6)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }}>
+          <div style={{ background: '#fff', borderRadius: '16px', padding: '24px', width: '420px', maxWidth: '95vw' }}>
+            <h3 style={{ margin: '0 0 8px', color: '#1B4F72', fontSize: '16px' }}>🔒 طلب حذف دفعة</h3>
+            <div style={{ background: '#f9fafb', borderRadius: '10px', padding: '12px', marginBottom: '14px', fontSize: '13px' }}>
+              <div><strong>المستأجر:</strong> {deleteTarget.tenantName} — شقة {deleteTarget.unitNumber}</div>
+              <div><strong>المبلغ:</strong> {deleteTarget.amountPaid?.toLocaleString('ar-SA')} ر.س</div>
+              <div><strong>التاريخ:</strong> {fmtDate(deleteTarget.paidDate)}</div>
+            </div>
+            <div style={{ marginBottom: '14px' }}>
+              <label style={{ display: 'block', fontSize: '13px', color: '#374151', marginBottom: '6px', fontWeight: '500' }}>سبب طلب الحذف</label>
+              <textarea value={deleteReason} onChange={e => setDeleteReason(e.target.value)} rows={3}
+                placeholder="اذكر سبب الحذف..."
+                style={{ width: '100%', border: '1.5px solid #e5e7eb', borderRadius: '10px', padding: '10px', fontSize: '13px', resize: 'none', boxSizing: 'border-box' }} />
+            </div>
+            <div style={{ display: 'flex', gap: '8px' }}>
+              <button onClick={sendDeleteRequest} disabled={saving}
+                style={{ flex: 1, padding: '11px', background: '#dc2626', color: '#fff', border: 'none', borderRadius: '10px', cursor: 'pointer', fontSize: '14px', fontWeight: '600' }}>
+                {saving ? 'جارٍ الإرسال...' : 'إرسال الطلب للمالك'}
+              </button>
+              <button onClick={() => { setDeleteTarget(null); setDeleteReason(''); }}
+                style={{ padding: '11px 20px', background: '#f3f4f6', color: '#374151', border: 'none', borderRadius: '10px', cursor: 'pointer' }}>
+                إلغاء
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
 
-const btnPrimary: React.CSSProperties = {
-  padding: '10px 20px', background: '#1B4F72', color: '#fff',
-  border: 'none', borderRadius: '10px', cursor: 'pointer', fontSize: '14px', fontFamily: 'sans-serif'
-};
+const lbl: React.CSSProperties = { display: 'block', fontSize: '12px', color: '#374151', marginBottom: '4px', fontWeight: '500' };
+const inp: React.CSSProperties = { width: '100%', border: '1.5px solid #e5e7eb', borderRadius: '10px', padding: '10px 12px', fontSize: '14px', boxSizing: 'border-box', background: '#fff' };
+const btnPrimary: React.CSSProperties = { padding: '10px 20px', background: '#1B4F72', color: '#fff', border: 'none', borderRadius: '10px', cursor: 'pointer', fontSize: '14px', fontFamily: 'sans-serif' };
