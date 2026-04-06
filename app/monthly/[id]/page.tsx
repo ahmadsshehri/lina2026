@@ -592,8 +592,7 @@ export default function TenantDetailPage() {
         </div>
       )}
     </div>
-  );
-}
+    
 {/* ══ Modal تأكيد حذف المستأجر ══ */}
       {deleteTenantConfirm && (
         <div style={{ position: 'fixed', inset: '0', background: 'rgba(0,0,0,0.6)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }}>
@@ -618,7 +617,8 @@ export default function TenantDetailPage() {
             </div>
           </div>
         </div>
-      )}
+  );
+}  )}
 
 const lbl: React.CSSProperties = {display:'block',fontSize:'13px',color:'#374151',marginBottom:'6px',fontWeight:'500'};
 const inp: React.CSSProperties = {width:'100%',border:'1.5px solid #e5e7eb',borderRadius:'10px',padding:'10px 12px',fontSize:'14px',boxSizing:'border-box',background:'#fff'};
