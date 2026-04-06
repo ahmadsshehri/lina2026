@@ -287,6 +287,11 @@ export default function MonthlyPage() {
                       style={{ flex: 1, padding: '9px', background: '#1B4F72', color: '#fff', border: 'none', borderRadius: '8px', cursor: 'pointer', fontSize: '13px', fontWeight: '600' }}>
                       تسجيل دفعة
                     </button>
+                     {/* ← أضف هذا الزر */}
+  <button onClick={() => router.push(`/monthly/${t.id}`)}
+    style={{ padding: '9px 14px', background: '#fff', border: '1px solid #e5e7eb', borderRadius: '8px', cursor: 'pointer', fontSize: '13px' }}>
+    👁️ تفاصيل
+  </button>
                     {canAddTenant && (
                       <button onClick={() => openEdit(t)}
                         style={{ padding: '9px 16px', background: '#fff', border: '1px solid #e5e7eb', borderRadius: '8px', cursor: 'pointer', fontSize: '13px' }}>
