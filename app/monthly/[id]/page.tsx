@@ -592,33 +592,8 @@ export default function TenantDetailPage() {
         </div>
       )}
     </div>
-    
-{/* ══ Modal تأكيد حذف المستأجر ══ */}
-      {deleteTenantConfirm && (
-        <div style={{ position: 'fixed', inset: '0', background: 'rgba(0,0,0,0.6)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }}>
-          <div style={{ background: '#fff', borderRadius: '16px', padding: '24px', width: '380px', maxWidth: '95vw', textAlign: 'center' }}>
-            <div style={{ fontSize: '48px', marginBottom: '12px' }}>🗑️</div>
-            <h3 style={{ margin: '0 0 8px', color: '#dc2626' }}>حذف مستأجر</h3>
-            <p style={{ color: '#111827', fontSize: '16px', fontWeight: '600', margin: '0 0 4px' }}>
-              {deleteTenantConfirm.name}
-            </p>
-            <p style={{ color: '#6b7280', fontSize: '13px', marginBottom: '20px' }}>
-              شقة {deleteTenantConfirm.unitNumber} · سيتم حذف المستأجر نهائياً وإعادة الشقة لشاغرة
-            </p>
-            <div style={{ display: 'flex', gap: '10px' }}>
-              <button onClick={() => deleteTenant(deleteTenantConfirm)} disabled={saving}
-                style={{ flex: 1, padding: '12px', background: '#dc2626', color: '#fff', border: 'none', borderRadius: '10px', cursor: 'pointer', fontSize: '14px', fontWeight: '600' }}>
-                {saving ? 'جارٍ الحذف...' : 'تأكيد الحذف'}
-              </button>
-              <button onClick={() => setDeleteTenantConfirm(null)}
-                style={{ padding: '12px 20px', background: '#f3f4f6', color: '#374151', border: 'none', borderRadius: '10px', cursor: 'pointer' }}>
-                إلغاء
-              </button>
-            </div>
-          </div>
-        </div>
   );
-}  )}
+}
 
 const lbl: React.CSSProperties = {display:'block',fontSize:'13px',color:'#374151',marginBottom:'6px',fontWeight:'500'};
 const inp: React.CSSProperties = {width:'100%',border:'1.5px solid #e5e7eb',borderRadius:'10px',padding:'10px 12px',fontSize:'14px',boxSizing:'border-box',background:'#fff'};
