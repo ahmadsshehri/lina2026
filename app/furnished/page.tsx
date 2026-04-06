@@ -15,28 +15,28 @@ interface Booking {
   guestPhone: string; channel: string; checkinDate: any; checkoutDate: any;
   nights: number; totalRevenue: number; platformFee: number; netRevenue: number;
   depositAmount: number; depositStatus: string; status: string; notes: string;
+  receivedBy?: string;
 }
 
 const CHANNELS: Record<string, { label: string; color: string; bg: string }> = {
-  airbnb:  { label: 'Airbnb',       color: '#991b1b', bg: '#fee2e2' },
-  gathern: { label: 'Gathern',      color: '#065f46', bg: '#d1fae5' },
-  booking: { label: 'Booking.com',  color: '#1e40af', bg: '#dbeafe' },
-  direct:  { label: 'مباشر',        color: '#92400e', bg: '#fef3c7' },
-  other:   { label: 'أخرى',         color: '#374151', bg: '#f3f4f6' },
+  airbnb:  { label: 'Airbnb',      color: '#991b1b', bg: '#fee2e2' },
+  gathern: { label: 'Gathern',     color: '#065f46', bg: '#d1fae5' },
+  booking: { label: 'Booking.com', color: '#1e40af', bg: '#dbeafe' },
+  direct:  { label: 'مباشر',       color: '#92400e', bg: '#fef3c7' },
+  other:   { label: 'أخرى',        color: '#374151', bg: '#f3f4f6' },
 };
 
-// حالات الحجز مع التدفق الصحيح
 const STATUS_INFO: Record<string, { label: string; color: string; bg: string }> = {
-  confirmed:  { label: '📅 مؤكد (قادم)',  color: '#1e40af', bg: '#dbeafe' },
-  checkedin:  { label: '✅ وصل',           color: '#065f46', bg: '#d1fae5' },
-  checkedout: { label: '🚪 غادر',          color: '#374151', bg: '#f3f4f6' },
-  cancelled:  { label: '❌ ملغي',          color: '#991b1b', bg: '#fee2e2' },
+  confirmed:  { label: '📅 مؤكد (قادم)', color: '#1e40af', bg: '#dbeafe' },
+  checkedin:  { label: '✅ وصل',          color: '#065f46', bg: '#d1fae5' },
+  checkedout: { label: '🚪 غادر',         color: '#374151', bg: '#f3f4f6' },
+  cancelled:  { label: '❌ ملغي',         color: '#991b1b', bg: '#fee2e2' },
 };
 
 const DEPOSIT_INFO: Record<string, { label: string; color: string; bg: string }> = {
-  held:     { label: 'محتجز',  color: '#92400e', bg: '#fef3c7' },
+  held:     { label: 'محتجز',   color: '#92400e', bg: '#fef3c7' },
   returned: { label: '✅ مُعاد', color: '#065f46', bg: '#d1fae5' },
-  deducted: { label: '⚠️ مخصوم', color: '#991b1b', bg: '#fee2e2' },
+  deducted: { label: '⚠️ مخصوم',color: '#991b1b', bg: '#fee2e2' },
 };
 
 function fmtDate(ts: any) {
@@ -49,7 +49,7 @@ function isToday(ts: any) {
   if (!ts) return false;
   const d = ts?.toDate ? ts.toDate() : new Date(ts);
   const t = new Date();
-  return d.getDate() === t.getDate() && d.getMonth() === t.getMonth() && d.getFullYear() === t.getFullYear();
+  return d.getDate()===t.getDate() && d.getMonth()===t.getMonth() && d.getFullYear()===t.getFullYear();
 }
 
 export default function FurnishedPage() {
@@ -66,15 +66,15 @@ export default function FurnishedPage() {
   const [filterStatus, setFilterStatus] = useState('all');
   const [depositConfirm, setDepositConfirm] = useState<{ booking: Booking; action: 'returned' | 'deducted' } | null>(null);
 
-  // صلاحيات
-  const canAddBooking = appUser?.role === 'owner' || appUser?.role === 'manager';
+  const canAddBooking    = appUser?.role === 'owner' || appUser?.role === 'manager';
   const canReturnDeposit = appUser?.role === 'owner' || appUser?.role === 'manager' || appUser?.role === 'accountant';
-  const canChangeStatus = appUser?.role === 'owner' || appUser?.role === 'manager';
+  const canChangeStatus  = appUser?.role === 'owner' || appUser?.role === 'manager';
 
   const [form, setForm] = useState({
     unitId: '', guestName: '', guestPhone: '', channel: 'airbnb',
     checkinDate: '', checkoutDate: '', totalRevenue: '', platformFee: '0',
-    depositAmount: '0', depositStatus: 'held', status: 'confirmed', notes: '',
+    depositAmount: '0', depositStatus: 'held', status: 'confirmed',
+    notes: '', receivedBy: 'manager',
   });
 
   useEffect(() => {
@@ -83,12 +83,11 @@ export default function FurnishedPage() {
       const user = await getCurrentUser(fbUser.uid);
       if (!user) { router.push('/login'); return; }
       setAppUser(user);
+      // تعيين المستلم الافتراضي حسب دور المستخدم
+      setForm(f => ({ ...f, receivedBy: user.role === 'owner' ? 'owner' : 'manager' }));
       const props = await loadPropertiesForUser(fbUser.uid, user.role);
       setProperties(props);
-      if (props.length > 0) {
-        setPropId(props[0].id);
-        await loadData(props[0].id);
-      }
+      if (props.length > 0) { setPropId(props[0].id); await loadData(props[0].id); }
       setLoading(false);
     });
     return unsub;
@@ -120,14 +119,15 @@ export default function FurnishedPage() {
       const unit = units.find(u => u.id === form.unitId);
       const nights = calcNights();
       const totalRevenue = Number(form.totalRevenue);
-      const platformFee = Number(form.platformFee);
+      const platformFee  = Number(form.platformFee);
       const data = {
         ...form, propertyId: propId, unitNumber: unit?.unitNumber || '',
         nights, totalRevenue, platformFee, netRevenue: totalRevenue - platformFee,
         nightlyRate: nights > 0 ? totalRevenue / nights : 0,
         depositAmount: Number(form.depositAmount),
-        checkinDate: Timestamp.fromDate(new Date(form.checkinDate)),
+        checkinDate:  Timestamp.fromDate(new Date(form.checkinDate)),
         checkoutDate: Timestamp.fromDate(new Date(form.checkoutDate)),
+        receivedBy: form.receivedBy,
       };
       if (editBooking) {
         await updateDoc(doc(db,'bookings',editBooking.id), data);
@@ -135,18 +135,17 @@ export default function FurnishedPage() {
         await addDoc(collection(db,'bookings'), { ...data, createdAt: serverTimestamp() });
       }
       await loadData(propId);
-      setShowModal(false); setEditBooking(null);
+      setShowModal(false);
+      setEditBooking(null);
     } catch (e) { alert('حدث خطأ'); }
     setSaving(false);
   };
 
-  // تغيير حالة الحجز — التدفق الصحيح
   const changeStatus = async (b: Booking, status: string) => {
     await updateDoc(doc(db,'bookings',b.id), { status });
     await loadData(propId);
   };
 
-  // معالجة التأمين
   const handleDeposit = async () => {
     if (!depositConfirm) return;
     setSaving(true);
@@ -164,21 +163,33 @@ export default function FurnishedPage() {
 
   const openAdd = () => {
     setEditBooking(null);
-    setForm({ unitId: units[0]?.id||'', guestName:'', guestPhone:'', channel:'airbnb', checkinDate:'', checkoutDate:'', totalRevenue:'', platformFee:'0', depositAmount:'0', depositStatus:'held', status:'confirmed', notes:'' });
+    setForm({
+      unitId: units[0]?.id||'', guestName:'', guestPhone:'', channel:'airbnb',
+      checkinDate:'', checkoutDate:'', totalRevenue:'', platformFee:'0',
+      depositAmount:'0', depositStatus:'held', status:'confirmed', notes:'',
+      receivedBy: appUser?.role === 'owner' ? 'owner' : 'manager',
+    });
     setShowModal(true);
   };
 
   const openEdit = (b: Booking) => {
     setEditBooking(b);
-    setForm({ unitId:b.unitId, guestName:b.guestName, guestPhone:b.guestPhone||'', channel:b.channel, checkinDate:'', checkoutDate:'', totalRevenue:String(b.totalRevenue), platformFee:String(b.platformFee||0), depositAmount:String(b.depositAmount||0), depositStatus:b.depositStatus, status:b.status, notes:b.notes||'' });
+    setForm({
+      unitId: b.unitId, guestName: b.guestName, guestPhone: b.guestPhone||'',
+      channel: b.channel, checkinDate:'', checkoutDate:'',
+      totalRevenue: String(b.totalRevenue), platformFee: String(b.platformFee||0),
+      depositAmount: String(b.depositAmount||0), depositStatus: b.depositStatus,
+      status: b.status, notes: b.notes||'',
+      receivedBy: b.receivedBy || 'manager',
+    });
     setShowModal(true);
   };
 
-  const activeBookings = bookings.filter(b => b.status !== 'cancelled');
-  const filtered = filterStatus === 'all' ? bookings : bookings.filter(b => b.status === filterStatus);
-  const totalRevenue = activeBookings.reduce((s,b) => s+(b.netRevenue||0), 0);
-  const pendingDeposits = bookings.filter(b => b.depositStatus === 'held' && b.depositAmount > 0 && b.status === 'checkedout').length;
-  const nights = calcNights();
+  const activeBookings  = bookings.filter(b => b.status !== 'cancelled');
+  const filtered        = filterStatus === 'all' ? bookings : bookings.filter(b => b.status === filterStatus);
+  const totalRevenue    = activeBookings.reduce((s,b) => s+(b.netRevenue||0), 0);
+  const pendingDeposits = bookings.filter(b => b.depositStatus==='held' && b.depositAmount>0 && b.status==='checkedout').length;
+  const nights          = calcNights();
 
   if (loading) return (
     <div style={{ display:'flex', justifyContent:'center', alignItems:'center', height:'100vh' }}>
@@ -198,8 +209,7 @@ export default function FurnishedPage() {
         <div style={{ flex:1 }}>
           <h1 style={{ margin:0, fontSize:'17px', fontWeight:'600', color:'#fff' }}>الشقق المفروشة</h1>
           <p style={{ margin:0, fontSize:'12px', color:'rgba(255,255,255,0.6)' }}>
-            {activeBookings.length} حجز نشط
-            {pendingDeposits > 0 && ` · ${pendingDeposits} تأمين معلق`}
+            {activeBookings.length} حجز نشط{pendingDeposits > 0 && ` · ${pendingDeposits} تأمين معلق`}
           </p>
         </div>
         <div style={{ display:'flex', gap:'8px', alignItems:'center' }}>
@@ -223,8 +233,8 @@ export default function FurnishedPage() {
         <div style={{ display:'grid', gridTemplateColumns:'repeat(3,1fr)', gap:'10px', marginBottom:'16px' }}>
           {[
             { label:'صافي الإيرادات', val:fmt(totalRevenue)+' ر.س', color:'#16a34a', bg:'#d1fae5' },
-            { label:'حجوزات نشطة', val:activeBookings.length+' حجز', color:'#1e40af', bg:'#dbeafe' },
-            { label:'تأمين معلق', val:pendingDeposits+' حجز', color:pendingDeposits>0?'#d97706':'#16a34a', bg:pendingDeposits>0?'#fef3c7':'#d1fae5' },
+            { label:'حجوزات نشطة',    val:activeBookings.length+' حجز', color:'#1e40af', bg:'#dbeafe' },
+            { label:'تأمين معلق',     val:pendingDeposits+' حجز', color:pendingDeposits>0?'#d97706':'#16a34a', bg:pendingDeposits>0?'#fef3c7':'#d1fae5' },
           ].map(k => (
             <div key={k.label} style={{ background:k.bg, borderRadius:'14px', padding:'14px 12px', textAlign:'center' }}>
               <div style={{ fontSize:'20px', fontWeight:'700', color:k.color }}>{k.val}</div>
@@ -243,7 +253,7 @@ export default function FurnishedPage() {
           ))}
         </div>
 
-        {/* Bookings list */}
+        {/* قائمة الحجوزات */}
         {filtered.length === 0 ? (
           <div style={{ background:'#fff', borderRadius:'16px', padding:'40px', textAlign:'center', border:'1px solid #e5e7eb' }}>
             <div style={{ fontSize:'48px', marginBottom:'12px' }}>🏨</div>
@@ -257,11 +267,13 @@ export default function FurnishedPage() {
               const st = STATUS_INFO[b.status] || STATUS_INFO.confirmed;
               const dp = DEPOSIT_INFO[b.depositStatus] || DEPOSIT_INFO.held;
               const todayCheckin = b.status === 'confirmed' && isToday(b.checkinDate);
+              const rcv = b.receivedBy === 'owner'
+                ? { label: 'المالك', color: '#7c3aed', bg: '#ede9fe', icon: '👑' }
+                : { label: 'المسؤول', color: '#1e40af', bg: '#dbeafe', icon: '👤' };
 
               return (
-                <div key={b.id} style={{ background:'#fff', borderRadius:'16px', border:`1px solid ${todayCheckin ? '#fbbf24' : '#e5e7eb'}`, overflow:'hidden', boxShadow: todayCheckin ? '0 0 0 2px #fbbf2440' : '0 1px 3px rgba(0,0,0,0.04)' }}>
+                <div key={b.id} style={{ background:'#fff', borderRadius:'16px', border:`1px solid ${todayCheckin?'#fbbf24':'#e5e7eb'}`, overflow:'hidden', boxShadow: todayCheckin?'0 0 0 2px #fbbf2440':'0 1px 3px rgba(0,0,0,0.04)' }}>
 
-                  {/* تنبيه اليوم */}
                   {todayCheckin && (
                     <div style={{ background:'#fef3c7', padding:'8px 16px', fontSize:'12px', color:'#92400e', fontWeight:'600', borderBottom:'1px solid #fbbf24' }}>
                       ⏰ وصول اليوم — {b.guestName}
@@ -297,11 +309,18 @@ export default function FurnishedPage() {
                       </div>
                     </div>
 
-                    {/* الحالة والتأمين */}
+                    {/* الحالة + مستلم المبلغ + التأمين */}
                     <div style={{ display:'flex', gap:'8px', flexWrap:'wrap', marginBottom:'12px', alignItems:'center' }}>
                       <span style={{ background:st.bg, color:st.color, padding:'4px 12px', borderRadius:'10px', fontSize:'12px', fontWeight:'600' }}>{st.label}</span>
 
-                      {/* ── تأمين واضح ── */}
+                      {/* مستلم المبلغ */}
+                      {b.receivedBy && (
+                        <span style={{ background:rcv.bg, color:rcv.color, padding:'4px 10px', borderRadius:'10px', fontSize:'11px', fontWeight:'600', display:'flex', alignItems:'center', gap:'4px' }}>
+                          {rcv.icon} استلمه {rcv.label}
+                        </span>
+                      )}
+
+                      {/* التأمين */}
                       {b.depositAmount > 0 && (
                         <div style={{ display:'flex', alignItems:'center', gap:'6px', background:dp.bg, border:`1px solid ${dp.color}30`, borderRadius:'10px', padding:'4px 12px' }}>
                           <span style={{ fontSize:'16px' }}>🔒</span>
@@ -309,7 +328,6 @@ export default function FurnishedPage() {
                             <div style={{ fontSize:'11px', color:dp.color, fontWeight:'600' }}>تأمين: {dp.label}</div>
                             <div style={{ fontSize:'12px', color:'#374151', fontWeight:'700' }}>{b.depositAmount?.toLocaleString('ar-SA')} ر.س</div>
                           </div>
-                          {/* زر استرداد التأمين — للمالك والمدير والمحاسب */}
                           {canReturnDeposit && b.depositStatus === 'held' && b.status === 'checkedout' && (
                             <div style={{ display:'flex', gap:'4px', marginRight:'6px' }}>
                               <button onClick={() => setDepositConfirm({ booking:b, action:'returned' })}
@@ -326,33 +344,27 @@ export default function FurnishedPage() {
                       )}
                     </div>
 
-                    {/* Actions — التدفق الصحيح */}
+                    {/* أزرار الإجراءات */}
                     {canChangeStatus && (
                       <div style={{ display:'flex', gap:'8px' }}>
-
-                        {/* مؤكد → اليوم: خيار وصل أو إلغي | غير اليوم: عرض فقط */}
                         {b.status === 'confirmed' && todayCheckin && (
                           <>
-                            <button onClick={() => changeStatus(b, 'checkedin')}
+                            <button onClick={() => changeStatus(b,'checkedin')}
                               style={{ flex:1, padding:'9px', background:'#d1fae5', color:'#065f46', border:'none', borderRadius:'8px', cursor:'pointer', fontSize:'13px', fontWeight:'600' }}>
                               ✅ سجّل الوصول
                             </button>
-                            <button onClick={() => changeStatus(b, 'cancelled')}
+                            <button onClick={() => changeStatus(b,'cancelled')}
                               style={{ padding:'9px 14px', background:'#fee2e2', color:'#dc2626', border:'none', borderRadius:'8px', cursor:'pointer', fontSize:'13px', fontWeight:'600' }}>
                               ❌ إلغاء
                             </button>
                           </>
                         )}
-
-                        {/* وصل → غادر */}
                         {b.status === 'checkedin' && (
-                          <button onClick={() => changeStatus(b, 'checkedout')}
+                          <button onClick={() => changeStatus(b,'checkedout')}
                             style={{ flex:1, padding:'9px', background:'#f3f4f6', color:'#374151', border:'none', borderRadius:'8px', cursor:'pointer', fontSize:'13px', fontWeight:'600' }}>
                             🚪 سجّل المغادرة
                           </button>
                         )}
-
-                        {/* تعديل دائماً */}
                         <button onClick={() => openEdit(b)}
                           style={{ padding:'9px 16px', background:'#fff', border:'1px solid #e5e7eb', borderRadius:'8px', cursor:'pointer', fontSize:'13px' }}>
                           تعديل
@@ -456,6 +468,23 @@ export default function FurnishedPage() {
                 </div>
               </div>
 
+              {/* ── مستلم المبلغ ── */}
+              <div>
+                <label style={{ ...lbl, fontWeight:'600' }}>💰 من استلم المبلغ؟</label>
+                <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:'8px' }}>
+                  {[
+                    { val:'manager', label:'مسؤول العقار', icon:'👤', color:'#1e40af', bg:'#dbeafe' },
+                    { val:'owner',   label:'المالك',        icon:'👑', color:'#7c3aed', bg:'#ede9fe' },
+                  ].map(opt => (
+                    <button key={opt.val} onClick={() => setForm(f => ({ ...f, receivedBy:opt.val }))}
+                      style={{ padding:'12px 8px', border:`2px solid ${form.receivedBy===opt.val?opt.color:'#e5e7eb'}`, borderRadius:'12px', background:form.receivedBy===opt.val?opt.bg:'#fff', cursor:'pointer', textAlign:'center', transition:'all 0.15s' }}>
+                      <div style={{ fontSize:'22px', marginBottom:'4px' }}>{opt.icon}</div>
+                      <div style={{ fontSize:'13px', fontWeight:'600', color:form.receivedBy===opt.val?opt.color:'#374151' }}>{opt.label}</div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
               {/* حالة الحجز */}
               <div>
                 <label style={lbl}>حالة الحجز</label>
@@ -519,7 +548,7 @@ export default function FurnishedPage() {
             <div style={{ display:'flex', gap:'10px' }}>
               <button onClick={handleDeposit} disabled={saving}
                 style={{ flex:1, padding:'12px', background:depositConfirm.action==='returned'?'#16a34a':'#dc2626', color:'#fff', border:'none', borderRadius:'10px', cursor:'pointer', fontSize:'14px', fontWeight:'600' }}>
-                {saving ? 'جارٍ...' : depositConfirm.action === 'returned' ? 'تأكيد الإعادة' : 'تأكيد الخصم'}
+                {saving ? 'جارٍ...' : depositConfirm.action==='returned' ? 'تأكيد الإعادة' : 'تأكيد الخصم'}
               </button>
               <button onClick={() => setDepositConfirm(null)}
                 style={{ padding:'12px 20px', background:'#f3f4f6', color:'#374151', border:'none', borderRadius:'10px', cursor:'pointer' }}>
