@@ -256,6 +256,10 @@ export default function CashflowPage() {
   const canEdit = appUser?.role === 'owner' || appUser?.role === 'manager';
 
   // ─── Auth & Load ──────────────────────────────────────────────────────────
+  // نحتفظ بـ propId و selectedMonth في ref حتى يصلهما listener
+  const propIdRef        = useRef('');
+  const selectedMonthRef = useRef(currentMonthStr());
+
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, async (fbUser) => {
       if (!fbUser) { router.push('/login'); return; }
@@ -266,12 +270,28 @@ export default function CashflowPage() {
       setProperties(props);
       if (props.length > 0) {
         setPropId(props[0].id);
+        propIdRef.current = props[0].id;
         await loadData(props[0].id, currentMonthStr());
       }
       setLoading(false);
     });
     return unsub;
   }, []);
+
+  // ✅ إعادة التحميل التلقائية عند العودة للصفحة (بعد حذف دفعة في صفحة أخرى)
+  useEffect(() => {
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible' && propIdRef.current) {
+        loadData(propIdRef.current, selectedMonthRef.current);
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
+    return () => document.removeEventListener('visibilitychange', handleVisibility);
+  }, []);
+
+  // ✅ تزامن الـ refs مع الـ state
+  useEffect(() => { propIdRef.current = propId; },        [propId]);
+  useEffect(() => { selectedMonthRef.current = selectedMonth; }, [selectedMonth]);
 
   const loadData = async (pid: string, month: string) => {
     const [y, m] = month.split('-').map(Number);
@@ -454,6 +474,14 @@ export default function CashflowPage() {
             + تحويل
           </button>
         )}
+        {/* زر تحديث يدوي */}
+        <button
+          onClick={() => propId && loadData(propId, selectedMonth)}
+          title="تحديث البيانات"
+          style={{ background:'rgba(255,255,255,0.15)', border:'none', borderRadius:'8px', padding:'8px 10px', cursor:'pointer', color:'#fff', fontSize:'16px' }}
+        >
+          🔄
+        </button>
       </div>
 
       <div style={{ padding:'16px', maxWidth:'700px', margin:'0 auto' }}>
