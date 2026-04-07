@@ -9,7 +9,7 @@ import {
   doc, setDoc, getDoc, collection, getDocs,
   query, where, serverTimestamp, updateDoc, arrayUnion,
 } from 'firebase/firestore';
-import { auth, db } from '../lib/firebase';
+import { auth, db } from '../../lib/firebase';
 import { useRouter } from 'next/navigation';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
