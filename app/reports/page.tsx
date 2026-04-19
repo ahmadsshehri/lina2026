@@ -24,9 +24,14 @@ const currentYear  = new Date().getFullYear();
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 interface TenantRow {
-  unitNumber: string; name: string; rentAmount: number;
-  payments: Record<number,number>; totalPaid: number;
-  totalExpected: number; balance: number;
+  unitNumber:    string;
+  name:          string;
+  rentAmount:    number;
+  payments:      Record<number, number>;
+  totalPaid:     number;
+  totalExpected: number;
+  balance:       number;
+  hasMultiple:   boolean; // شقة فيها أكثر من مستأجر في الفترة
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -42,19 +47,18 @@ export default function ReportsPage() {
   const [propId,     setPropId]     = useState('');
   const [propName,   setPropName]   = useState('');
   const [yearStr,    setYearStr]    = useState(String(currentYear));
-  const [selectedMonth, setSelectedMonth] = useState<number>(0); // 0 = سنوي
+  const [selectedMonth, setSelectedMonth] = useState<number>(0);
   const [activeTab,  setActiveTab]  = useState<'financial'|'rent'|'units'|'furnished'>('financial');
   const [loading,    setLoading]    = useState(true);
   const [dataLoading,setDataLoading]= useState(false);
 
-  // Raw data
   const [units,    setUnits]    = useState<any[]>([]);
   const [tenants,  setTenants]  = useState<any[]>([]);
   const [payments, setPayments] = useState<any[]>([]);
   const [bookings, setBookings] = useState<any[]>([]);
   const [expenses, setExpenses] = useState<any[]>([]);
 
-  // ─── Auth ─────────────────────────────────────────────────────────────────
+  // ─── Auth ──────────────────────────────────────────────────────────────────
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, async (fbUser) => {
       if (!fbUser) { router.push('/login'); return; }
@@ -89,23 +93,17 @@ export default function ReportsPage() {
     setDataLoading(false);
   };
 
-  // ─── Date filter helpers ──────────────────────────────────────────────────
+  // ─── Date helpers ──────────────────────────────────────────────────────────
   const y = parseInt(yearStr);
 
-  // نطاق التواريخ بناءً على الشهر المختار
   const dateRange = useMemo(() => {
-    if (selectedMonth === 0) {
-      // سنوي — كل الشهور
-      return { start: new Date(y,0,1), end: new Date(y,11,31,23,59,59) };
-    }
-    return { start: new Date(y, selectedMonth-1, 1), end: new Date(y, selectedMonth, 0, 23, 59, 59) };
+    if (selectedMonth === 0) return { start: new Date(y,0,1), end: new Date(y,11,31,23,59,59) };
+    return { start: new Date(y,selectedMonth-1,1), end: new Date(y,selectedMonth,0,23,59,59) };
   }, [y, selectedMonth]);
 
-  const months = selectedMonth === 0
-    ? [1,2,3,4,5,6,7,8,9,10,11,12]
-    : [selectedMonth];
+  const months = selectedMonth === 0 ? [1,2,3,4,5,6,7,8,9,10,11,12] : [selectedMonth];
 
-  // ─── Filtered data (مفلترة بالسنة + الشهر) ───────────────────────────────
+  // ─── Filtered data ─────────────────────────────────────────────────────────
   const filteredPayments = useMemo(() => payments.filter(p => {
     const d = p.paidDate?.toDate ? p.paidDate.toDate() : null;
     return d && d >= dateRange.start && d <= dateRange.end;
@@ -122,7 +120,7 @@ export default function ReportsPage() {
     return d && d >= dateRange.start && d <= dateRange.end;
   }), [expenses, dateRange]);
 
-  // ─── Monthly reports (للرسم البياني السنوي فقط) ──────────────────────────
+  // ─── Monthly reports ────────────────────────────────────────────────────────
   const reports = useMemo(() => Array.from({ length:12 }, (_,i) => {
     const m = i+1;
     const ms = new Date(y,m-1,1), me = new Date(y,m,0,23,59,59);
@@ -135,66 +133,129 @@ export default function ReportsPage() {
     return { month:m, monthlyRevenue:rent, furnishedRevenue:furn, totalRevenue:rent+furn, totalExpenses:exp, netProfit:rent+furn-exp };
   }), [payments, bookings, expenses, y]);
 
-  // ─── Filtered monthly reports (للجدول التفصيلي) ──────────────────────────
-  const filteredReports = useMemo(() => {
-    if (selectedMonth === 0) return reports;
-    return reports.filter(r => r.month === selectedMonth);
-  }, [reports, selectedMonth]);
+  const filteredReports = useMemo(() =>
+    selectedMonth === 0 ? reports : reports.filter(r => r.month === selectedMonth)
+  , [reports, selectedMonth]);
 
-  // ─── Year totals (مبني على الفلتر الحالي) ────────────────────────────────
   const yearTotals = useMemo(() => ({
     revenue:  filteredReports.reduce((s,r)=>s+r.totalRevenue,0),
     expenses: filteredReports.reduce((s,r)=>s+r.totalExpenses,0),
     profit:   filteredReports.reduce((s,r)=>s+r.netProfit,0),
   }), [filteredReports]);
 
-  // ─── Rent Table (جدول الإيجار — مفلتر بالشهر) ───────────────────────────
+  // ─── ✅ Rent Table — الإصلاح الكامل لمشكلة تعدد المستأجرين ────────────────
   const rentTable = useMemo((): TenantRow[] => {
     return units
-      .filter(u => u.type==='monthly' || u.type==='owner')
-      .sort((a,b) => a.unitNumber?.localeCompare(b.unitNumber,undefined,{numeric:true}))
+      .filter(u => u.type === 'monthly' || u.type === 'owner')
+      .sort((a, b) => a.unitNumber?.localeCompare(b.unitNumber, undefined, { numeric: true }))
       .map(u => {
-        const tenant = tenants.find(t => t.unitId===u.id || t.unitNumber===u.unitNumber);
-        const monthPays: Record<number,number> = {};
+
+        // ✅ نجمع كل المستأجرين لهذه الشقة (حاليين وسابقين)
+        const unitTenants = tenants.filter(t => t.unitId === u.id);
+
+        // ✅ نحسب الدفعات لكل شهر من كل المستأجرين
+        const monthPays: Record<number, number> = {};
         let totalPaid = 0;
 
         months.forEach(m => {
-          const ms = new Date(y,m-1,1), me = new Date(y,m,0,23,59,59);
-          const paid = tenant
-            ? payments.filter(p =>
-                p.tenantId===tenant.id &&
-                (() => { const d=p.paidDate?.toDate?p.paidDate.toDate():null; return d&&d>=ms&&d<=me; })()
-              ).reduce((s:number,p:any)=>s+(p.amountPaid||0),0)
-            : 0;
-          monthPays[m] = paid;
-          totalPaid += paid;
+          const ms = new Date(y, m-1, 1);
+          const me = new Date(y, m, 0, 23, 59, 59);
+
+          // نجمع دفعات كل المستأجرين في هذا الشهر لهذه الشقة
+          const monthAmount = unitTenants.reduce((unitSum, tenant) => {
+            const paid = payments
+              .filter(p => {
+                if (p.tenantId !== tenant.id) return false;
+                const d = p.paidDate?.toDate ? p.paidDate.toDate() : null;
+                return d && d >= ms && d <= me;
+              })
+              .reduce((s: number, p: any) => s + (p.amountPaid || 0), 0);
+            return unitSum + paid;
+          }, 0);
+
+          monthPays[m] = monthAmount;
+          totalPaid += monthAmount;
         });
 
-        const rent = tenant?.rentAmount || 0;
-        const totalExpected = rent * months.length;
+        // ✅ نحسب المبلغ المتوقع بناءً على من كان ساكناً فعلاً في كل شهر
+        let totalExpected = 0;
+        months.forEach(m => {
+          const ms = new Date(y, m-1, 1);
+          const me = new Date(y, m, 0, 23, 59, 59);
+
+          // المستأجر الذي كان ساكناً في هذا الشهر (عقده يتقاطع مع الشهر)
+          const tenantInMonth = unitTenants.find(t => {
+            const start = t.contractStart?.toDate ? t.contractStart.toDate() : null;
+            const end   = t.contractEnd?.toDate   ? t.contractEnd.toDate()   : null;
+            if (!start || !end) return false;
+            return start <= me && end >= ms;
+          });
+
+          if (tenantInMonth) {
+            totalExpected += tenantInMonth.rentAmount || 0;
+          }
+        });
+
+        // ✅ المستأجر الحالي للعرض (أو الأخير)
+        const activeTenant = unitTenants.find(t => t.status === 'active');
+        const latestTenant = unitTenants.sort((a,b) =>
+          (b.contractStart?.seconds||0) - (a.contractStart?.seconds||0)
+        )[0];
+        const displayTenant = activeTenant || latestTenant;
+
+        // ✅ تحديد من كان ساكناً في الفترة المختارة
+        const tenantsInPeriod = unitTenants.filter(t => {
+          const start = t.contractStart?.toDate ? t.contractStart.toDate() : null;
+          const end   = t.contractEnd?.toDate   ? t.contractEnd.toDate()   : null;
+          if (!start || !end) return false;
+          return start <= dateRange.end && end >= dateRange.start;
+        });
+
+        // ✅ اسم العرض
+        let displayName: string;
+        if (unitTenants.length === 0) {
+          displayName = u.status === 'vacant' ? 'شاغرة' : '—';
+        } else if (tenantsInPeriod.length > 1) {
+          // عدة مستأجرين في الفترة → نعرضهم بالترتيب الزمني
+          displayName = tenantsInPeriod
+            .sort((a,b) => (a.contractStart?.seconds||0) - (b.contractStart?.seconds||0))
+            .map(t => t.name)
+            .join(' · ');
+        } else if (tenantsInPeriod.length === 1) {
+          displayName = tenantsInPeriod[0].name;
+        } else {
+          displayName = displayTenant?.name || 'شاغرة';
+        }
+
         return {
-          unitNumber: u.unitNumber, name: tenant?.name||(u.status==='vacant'?'شاغرة':'—'),
-          rentAmount: rent, payments: monthPays, totalPaid,
-          totalExpected, balance: Math.max(0, totalExpected-totalPaid),
+          unitNumber:    u.unitNumber,
+          name:          displayName,
+          rentAmount:    displayTenant?.rentAmount || 0,
+          payments:      monthPays,
+          totalPaid,
+          totalExpected,
+          balance:       Math.max(0, totalExpected - totalPaid),
+          hasMultiple:   tenantsInPeriod.length > 1,
         };
       });
-  }, [units, tenants, payments, y, months]);
+  }, [units, tenants, payments, y, months, dateRange]);
 
-  // ─── Units report (مفلتر) ────────────────────────────────────────────────
+  // ─── Units report ──────────────────────────────────────────────────────────
   const unitReport = useMemo(() => units.map(u => {
-    const tenant  = tenants.find(t=>t.unitId===u.id||t.unitNumber===u.unitNumber);
-    const uPays   = tenant ? filteredPayments.filter(p=>p.tenantId===tenant.id) : [];
+    // ✅ نجمع دفعات كل المستأجرين لهذه الشقة في الفترة
+    const unitTenants  = tenants.filter(t => t.unitId === u.id);
+    const uPays        = filteredPayments.filter(p => unitTenants.some(t => t.id === p.tenantId));
     const totalPaid    = uPays.reduce((s:number,p:any)=>s+(p.amountPaid||0),0);
     const totalBalance = uPays.reduce((s:number,p:any)=>s+(p.balance||0),0);
-    const lastPay = uPays.sort((a:any,b:any)=>(b.paidDate?.seconds||0)-(a.paidDate?.seconds||0))[0];
-
+    const lastPay      = [...uPays].sort((a:any,b:any)=>(b.paidDate?.seconds||0)-(a.paidDate?.seconds||0))[0];
+    const activeTenant = unitTenants.find(t=>t.status==='active');
     let statusLabel='شاغرة', statusColor='#dc2626', statusBg='#fee2e2';
-    if (u.status==='occupied'&&tenant) {
+    if (u.status==='occupied'&&activeTenant) {
       if (totalBalance>0) { statusLabel='متأخرة'; statusColor='#d97706'; statusBg='#fef3c7'; }
       else if (totalPaid>0) { statusLabel='مسددة'; statusColor='#16a34a'; statusBg='#d1fae5'; }
       else { statusLabel='لا دفعات'; statusColor='#6b7280'; statusBg='#f3f4f6'; }
     } else if (u.status==='maintenance') { statusLabel='صيانة'; statusColor='#6b7280'; statusBg='#f3f4f6'; }
-    return { ...u, tenant, totalPaid, totalBalance, lastPay, statusLabel, statusColor, statusBg };
+    return { ...u, tenant:activeTenant, totalPaid, totalBalance, lastPay, statusLabel, statusColor, statusBg };
   }), [units, tenants, filteredPayments]);
 
   const unitSummary = useMemo(() => ({
@@ -206,92 +267,76 @@ export default function ReportsPage() {
     totalArrears:unitReport.reduce((s,u)=>s+(u.totalBalance||0),0),
   }), [unitReport]);
 
-  // ─── Furnished report (مفلتر) ────────────────────────────────────────────
+  // ─── Furnished report ──────────────────────────────────────────────────────
   const furnishedUnits = useMemo(() => units.filter(u=>u.type==='furnished'), [units]);
 
   const furnishedReport = useMemo(() => furnishedUnits.map(u => {
     const uBook = filteredBookings.filter(b=>b.unitId===u.id);
     const uExp  = filteredExpenses.filter(e=>e.unitId===u.id);
-
-    // حساب نسبة الإشغال للشهر أو السنة
     let occ=0, totalDays=0;
     months.forEach(m => {
       const days = daysInMonth(y,m);
       totalDays += days;
       for (let d=1; d<=days; d++) {
         const dayDate = new Date(y,m-1,d);
-        if (filteredBookings.some(b => {
-          if (b.unitId!==u.id) return false;
-          const ci = b.checkinDate?.toDate?b.checkinDate.toDate():new Date(b.checkinDate);
-          const co = b.checkoutDate?.toDate?b.checkoutDate.toDate():new Date(b.checkoutDate);
-          return dayDate>=ci && dayDate<co;
+        if (filteredBookings.some(b=>{
+          if(b.unitId!==u.id)return false;
+          const ci=b.checkinDate?.toDate?b.checkinDate.toDate():new Date(b.checkinDate);
+          const co=b.checkoutDate?.toDate?b.checkoutDate.toDate():new Date(b.checkoutDate);
+          return dayDate>=ci&&dayDate<co;
         })) occ++;
       }
     });
-
     const totalRevenue  = uBook.reduce((s:number,b:any)=>s+(b.netRevenue||0),0);
     const totalExpenses = uExp.reduce((s:number,e:any)=>s+(e.amount||0),0);
     const byChannel: Record<string,{count:number;revenue:number}> = {};
-    uBook.forEach((b:any) => {
+    uBook.forEach((b:any)=>{
       if(!byChannel[b.channel]) byChannel[b.channel]={count:0,revenue:0};
-      byChannel[b.channel].count++;
-      byChannel[b.channel].revenue+=b.netRevenue||0;
+      byChannel[b.channel].count++; byChannel[b.channel].revenue+=b.netRevenue||0;
     });
     return {
       ...u, bookingsCount:uBook.length, totalRevenue, totalExpenses,
       netProfit:totalRevenue-totalExpenses,
-      occupancyRate: totalDays>0 ? Math.round(occ/totalDays*100) : 0,
+      occupancyRate:totalDays>0?Math.round(occ/totalDays*100):0,
       byChannel,
-      avgNightlyRate: uBook.length>0
-        ? Math.round(totalRevenue/Math.max(1,uBook.reduce((s:number,b:any)=>s+(b.nights||0),0)))
-        : 0,
+      avgNightlyRate:uBook.length>0?Math.round(totalRevenue/Math.max(1,uBook.reduce((s:number,b:any)=>s+(b.nights||0),0))):0,
     };
   }), [furnishedUnits, filteredBookings, filteredExpenses, months, y]);
 
   const overallOccupancy = furnishedUnits.length>0
     ? Math.round(furnishedReport.reduce((s,u)=>s+u.occupancyRate,0)/furnishedUnits.length) : 0;
 
-  // Global channel stats (مفلترة)
-  const globalChannels = useMemo(() => {
-    const acc: Record<string,{count:number;revenue:number}> = {};
-    filteredBookings.forEach((b:any) => {
-      if(!acc[b.channel]) acc[b.channel]={count:0,revenue:0};
-      acc[b.channel].count++; acc[b.channel].revenue+=b.netRevenue||0;
-    });
+  const globalChannels = useMemo(()=>{
+    const acc: Record<string,{count:number;revenue:number}>={};
+    filteredBookings.forEach((b:any)=>{ if(!acc[b.channel]) acc[b.channel]={count:0,revenue:0}; acc[b.channel].count++; acc[b.channel].revenue+=b.netRevenue||0; });
     return acc;
   }, [filteredBookings]);
 
-  // ─── Export Excel ──────────────────────────────────────────────────────────
+  // ─── Export Excel ───────────────────────────────────────────────────────────
   const exportToExcel = async () => {
     const XLSX = await import('xlsx');
-    const title = selectedMonth===0
-      ? `تقرير الإيجار السنوي — ${y}`
-      : `تقرير الإيجار — ${MONTHS_AR[selectedMonth-1]} ${y}`;
     const header = ['رقم الشقة','اسم المستأجر','الإيجار', ...months.map(m=>MONTHS_AR[m-1]),'المجموع','المتأخرات','النسبة'];
-    const rows = rentTable.map(t => {
+    const rows = rentTable.map(t=>{
       const pct = t.totalExpected>0?`${Math.round(t.totalPaid/t.totalExpected*100)}%`:'—';
-      return [t.unitNumber,t.name,t.rentAmount||'', ...months.map(m=>t.payments[m]||''), t.totalPaid||'', t.balance||'', pct];
+      return [t.unitNumber, t.name, t.rentAmount||'', ...months.map(m=>t.payments[m]||''), t.totalPaid||'', t.balance||'', pct];
     });
     const totalRow = ['الإجمالي','',rentTable.reduce((s,t)=>s+t.rentAmount,0),
       ...months.map(m=>rentTable.reduce((s,t)=>s+(t.payments[m]||0),0)),
       rentTable.reduce((s,t)=>s+t.totalPaid,0), rentTable.reduce((s,t)=>s+t.balance,0),''];
     const ws = XLSX.utils.aoa_to_sheet([header,...rows,totalRow]);
-    ws['!cols'] = [{wch:10},{wch:26},{wch:14},...months.map(()=>({wch:12})),{wch:16},{wch:14},{wch:12}];
+    ws['!cols'] = [{wch:10},{wch:30},{wch:14},...months.map(()=>({wch:12})),{wch:16},{wch:14},{wch:12}];
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, 'جدول الإيجار');
     XLSX.writeFile(wb, `rent_report_${y}_${selectedMonth||'annual'}.xlsx`);
   };
 
-  // ─── Chart data ───────────────────────────────────────────────────────────
-  const chartData = (selectedMonth===0 ? reports : filteredReports).map((r,i) => ({
-    name: selectedMonth===0 ? MONTHS_AR[r.month-1].slice(0,3) : MONTHS_AR[r.month-1],
-    إيرادات: r.totalRevenue, مصاريف: r.totalExpenses, صافي: r.netProfit,
+  // ─── Chart data ─────────────────────────────────────────────────────────────
+  const chartData = (selectedMonth===0?reports:filteredReports).map(r=>({
+    name: MONTHS_AR[r.month-1].slice(0,3),
+    إيرادات:r.totalRevenue, مصاريف:r.totalExpenses, صافي:r.netProfit,
   }));
 
-  // ─── Period label ─────────────────────────────────────────────────────────
-  const periodLabel = selectedMonth===0
-    ? `سنة ${y}`
-    : `${MONTHS_AR[selectedMonth-1]} ${y}`;
+  const periodLabel = selectedMonth===0 ? `سنة ${y}` : `${MONTHS_AR[selectedMonth-1]} ${y}`;
 
   if (loading) return (
     <div style={{ display:'flex', justifyContent:'center', alignItems:'center', height:'100vh' }}>
@@ -341,13 +386,9 @@ export default function ReportsPage() {
               </select>
             </div>
           </div>
-
-          {/* Period indicator */}
           <div style={{ display:'flex', alignItems:'center', gap:'8px', padding:'8px 12px', background:'#eff6ff', borderRadius:'8px', border:'1px solid #bfdbfe' }}>
             <span style={{ fontSize:'14px' }}>📅</span>
-            <span style={{ fontSize:'13px', color:'#1e40af', fontWeight:'600' }}>
-              عرض بيانات: {periodLabel}
-            </span>
+            <span style={{ fontSize:'13px', color:'#1e40af', fontWeight:'600' }}>عرض بيانات: {periodLabel}</span>
             {selectedMonth!==0 && (
               <button onClick={() => setSelectedMonth(0)}
                 style={{ marginRight:'auto', fontSize:'11px', color:'#6b7280', background:'none', border:'1px solid #e5e7eb', borderRadius:'6px', padding:'3px 10px', cursor:'pointer', fontFamily:'sans-serif' }}>
@@ -359,13 +400,8 @@ export default function ReportsPage() {
 
         {/* ══ Tabs ══ */}
         <div style={{ display:'flex', background:'#fff', borderRadius:'12px', padding:'4px', marginBottom:'16px', border:'1px solid #e5e7eb', gap:'2px' }}>
-          {([
-            ['financial','📊 المالي'],
-            ['rent',     '📋 جدول الإيجار'],
-            ['units',    '🏠 الوحدات'],
-            ['furnished','🏨 المفروشة'],
-          ] as const).map(([id,label]) => (
-            <button key={id} onClick={() => setActiveTab(id)}
+          {([['financial','📊 المالي'],['rent','📋 جدول الإيجار'],['units','🏠 الوحدات'],['furnished','🏨 المفروشة']] as const).map(([id,label])=>(
+            <button key={id} onClick={()=>setActiveTab(id)}
               style={{ flex:1, padding:'9px 4px', border:'none', borderRadius:'10px', cursor:'pointer', fontSize:'12px', fontWeight:activeTab===id?'600':'400', background:activeTab===id?'#1B4F72':'transparent', color:activeTab===id?'#fff':'#6b7280', transition:'all 0.15s', fontFamily:'sans-serif' }}>
               {label}
             </button>
@@ -384,15 +420,15 @@ export default function ReportsPage() {
           </div>
         ) : (
           <>
+
             {/* ══ TAB: المالي ══ */}
             {activeTab==='financial' && (
               <div>
-                {/* KPIs */}
                 <div style={{ display:'grid', gridTemplateColumns:'repeat(3,1fr)', gap:'12px', marginBottom:'16px' }}>
                   {[
-                    { label:`إجمالي الإيرادات — ${periodLabel}`,  val:fmt(yearTotals.revenue)+' ر.س',  sub:selectedMonth===0?`متوسط: ${fmt(Math.round(yearTotals.revenue/12))} شهرياً`:'', color:'#2E86C1', border:'#2E86C1' },
-                    { label:`إجمالي المصاريف — ${periodLabel}`,   val:fmt(yearTotals.expenses)+' ر.س', sub:'', color:'#dc2626', border:'#dc2626' },
-                    { label:`صافي الربح — ${periodLabel}`,        val:fmt(yearTotals.profit)+' ر.س',   sub:yearTotals.revenue>0?`هامش: ${fmtPct(yearTotals.profit/yearTotals.revenue*100)}`:'', color:yearTotals.profit>=0?'#16a34a':'#dc2626', border:'#16a34a' },
+                    { label:`إجمالي الإيرادات — ${periodLabel}`, val:fmt(yearTotals.revenue)+' ر.س', sub:selectedMonth===0?`متوسط: ${fmt(Math.round(yearTotals.revenue/12))} شهرياً`:'', color:'#2E86C1', border:'#2E86C1' },
+                    { label:`إجمالي المصاريف — ${periodLabel}`,  val:fmt(yearTotals.expenses)+' ر.س', sub:'', color:'#dc2626', border:'#dc2626' },
+                    { label:`صافي الربح — ${periodLabel}`,       val:fmt(yearTotals.profit)+' ر.س', sub:yearTotals.revenue>0?`هامش: ${fmtPct(yearTotals.profit/yearTotals.revenue*100)}`:'', color:yearTotals.profit>=0?'#16a34a':'#dc2626', border:'#16a34a' },
                   ].map(k=>(
                     <div key={k.label} style={{ background:'#fff', borderRadius:'14px', border:'1px solid #e5e7eb', borderTop:`3px solid ${k.border}`, padding:'16px' }}>
                       <div style={{ fontSize:'11px', color:'#6b7280', marginBottom:'6px' }}>{k.label}</div>
@@ -402,7 +438,6 @@ export default function ReportsPage() {
                   ))}
                 </div>
 
-                {/* Chart — يظهر فقط في السنوي */}
                 {selectedMonth===0 && (
                   <>
                     <div style={{ background:'#fff', borderRadius:'14px', border:'1px solid #e5e7eb', padding:'16px', marginBottom:'14px' }}>
@@ -435,17 +470,14 @@ export default function ReportsPage() {
                   </>
                 )}
 
-                {/* تفاصيل الشهر المختار */}
                 {selectedMonth!==0 && (
                   <div style={{ background:'#fff', borderRadius:'14px', border:'1px solid #e5e7eb', padding:'16px', marginBottom:'14px' }}>
-                    <div style={{ fontSize:'13px', fontWeight:'600', color:'#374151', marginBottom:'12px' }}>
-                      تفاصيل {MONTHS_AR[selectedMonth-1]} {y}
-                    </div>
+                    <div style={{ fontSize:'13px', fontWeight:'600', color:'#374151', marginBottom:'12px' }}>تفاصيل {MONTHS_AR[selectedMonth-1]} {y}</div>
                     <div style={{ display:'grid', gridTemplateColumns:'repeat(3,1fr)', gap:'10px' }}>
                       {[
-                        { label:'إيجار شهري',    val:filteredReports[0]?.monthlyRevenue||0, color:'#1e40af', bg:'#dbeafe' },
-                        { label:'مفروشة',         val:filteredReports[0]?.furnishedRevenue||0, color:'#065f46', bg:'#d1fae5' },
-                        { label:'مصاريف',         val:filteredReports[0]?.totalExpenses||0, color:'#dc2626', bg:'#fee2e2' },
+                        { label:'إيجار شهري', val:filteredReports[0]?.monthlyRevenue||0, color:'#1e40af', bg:'#dbeafe' },
+                        { label:'مفروشة',      val:filteredReports[0]?.furnishedRevenue||0, color:'#065f46', bg:'#d1fae5' },
+                        { label:'مصاريف',      val:filteredReports[0]?.totalExpenses||0, color:'#dc2626', bg:'#fee2e2' },
                       ].map(k=>(
                         <div key={k.label} style={{ background:k.bg, borderRadius:'10px', padding:'12px', textAlign:'center' }}>
                           <div style={{ fontSize:'16px', fontWeight:'700', color:k.color }}>{fmt(k.val)} ر.س</div>
@@ -456,10 +488,9 @@ export default function ReportsPage() {
                   </div>
                 )}
 
-                {/* جدول شهري تفصيلي */}
                 <div style={{ background:'#fff', borderRadius:'14px', border:'1px solid #e5e7eb', overflow:'hidden' }}>
                   <div style={{ padding:'14px 16px', borderBottom:'1px solid #e5e7eb', fontSize:'13px', fontWeight:'600', color:'#374151' }}>
-                    التقرير {selectedMonth===0?'الشهري التفصيلي':'التفصيلي'} — {periodLabel}
+                    التقرير التفصيلي — {periodLabel}
                   </div>
                   <div style={{ overflowX:'auto' }}>
                     <table style={{ width:'100%', borderCollapse:'collapse', fontSize:'12px' }}>
@@ -471,7 +502,7 @@ export default function ReportsPage() {
                       <tbody>
                         {filteredReports.map((r,i)=>(
                           <tr key={i} style={{ borderBottom:'1px solid #f3f4f6' }}>
-                            <td style={{ padding:'9px 12px', fontWeight:'600', color:'#374151', whiteSpace:'nowrap' }}>{MONTHS_AR[r.month-1]}</td>
+                            <td style={{ padding:'9px 12px', fontWeight:'600', color:'#374151' }}>{MONTHS_AR[r.month-1]}</td>
                             <td style={{ padding:'9px 12px' }}>{r.monthlyRevenue>0?fmt(r.monthlyRevenue):'—'}</td>
                             <td style={{ padding:'9px 12px' }}>{r.furnishedRevenue>0?fmt(r.furnishedRevenue):'—'}</td>
                             <td style={{ padding:'9px 12px', fontWeight:'600' }}>{r.totalRevenue>0?fmt(r.totalRevenue):'—'}</td>
@@ -505,13 +536,20 @@ export default function ReportsPage() {
             {/* ══ TAB: جدول الإيجار ══ */}
             {activeTab==='rent' && (
               <div>
-                {/* KPIs */}
+                {/* تنبيه شقق متعددة مستأجرين */}
+                {rentTable.some(t=>t.hasMultiple) && (
+                  <div style={{ background:'#eff6ff', border:'1px solid #bfdbfe', borderRadius:'10px', padding:'10px 14px', marginBottom:'14px', fontSize:'12px', color:'#1e40af', display:'flex', gap:'8px' }}>
+                    <span>ℹ️</span>
+                    <span>الشقق المميزة بـ <strong>👥</strong> كان فيها أكثر من مستأجر في هذه الفترة — المبالغ تشمل دفعات جميع المستأجرين</span>
+                  </div>
+                )}
+
                 <div style={{ display:'grid', gridTemplateColumns:'repeat(4,1fr)', gap:'10px', marginBottom:'16px' }}>
                   {[
-                    { label:'إجمالي الوحدات',  val:rentTable.length,                                               color:'#1B4F72', bg:'#dbeafe' },
-                    { label:'إجمالي المحصّل',  val:fmt(rentTable.reduce((s,t)=>s+t.totalPaid,0))+' ر.س',           color:'#16a34a', bg:'#d1fae5' },
-                    { label:'إجمالي المتأخرات',val:fmt(rentTable.reduce((s,t)=>s+t.balance,0))+' ر.س',             color:'#dc2626', bg:'#fee2e2' },
-                    { label:'نسبة التحصيل',    val:fmtPct(rentTable.reduce((s,t)=>s+t.totalPaid,0)/Math.max(1,rentTable.reduce((s,t)=>s+t.totalExpected,0))*100), color:'#7c3aed', bg:'#ede9fe' },
+                    { label:'إجمالي الوحدات',   val:rentTable.length,                                              color:'#1B4F72', bg:'#dbeafe' },
+                    { label:'إجمالي المحصّل',   val:fmt(rentTable.reduce((s,t)=>s+t.totalPaid,0))+' ر.س',          color:'#16a34a', bg:'#d1fae5' },
+                    { label:'إجمالي المتأخرات', val:fmt(rentTable.reduce((s,t)=>s+t.balance,0))+' ر.س',            color:'#dc2626', bg:'#fee2e2' },
+                    { label:'نسبة التحصيل',     val:fmtPct(rentTable.reduce((s,t)=>s+t.totalPaid,0)/Math.max(1,rentTable.reduce((s,t)=>s+t.totalExpected,0))*100), color:'#7c3aed', bg:'#ede9fe' },
                   ].map(k=>(
                     <div key={k.label} style={{ background:k.bg, borderRadius:'12px', padding:'14px 10px', textAlign:'center' }}>
                       <div style={{ fontSize:'16px', fontWeight:'700', color:k.color }}>{k.val}</div>
@@ -520,25 +558,21 @@ export default function ReportsPage() {
                   ))}
                 </div>
 
-                {/* Period badge + Export */}
                 <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:'12px' }}>
-                  <span style={{ fontSize:'13px', color:'#6b7280' }}>
-                    البيانات المعروضة: <strong style={{ color:'#1B4F72' }}>{periodLabel}</strong>
-                  </span>
+                  <span style={{ fontSize:'13px', color:'#6b7280' }}>البيانات: <strong style={{ color:'#1B4F72' }}>{periodLabel}</strong></span>
                   <button onClick={exportToExcel}
                     style={{ padding:'10px 20px', background:'#1E8449', color:'#fff', border:'none', borderRadius:'10px', cursor:'pointer', fontSize:'13px', fontWeight:'600', fontFamily:'sans-serif', display:'flex', alignItems:'center', gap:'8px' }}>
                     ⬇ تصدير Excel
                   </button>
                 </div>
 
-                {/* Table */}
                 <div style={{ background:'#fff', borderRadius:'14px', border:'1px solid #e5e7eb', overflow:'hidden' }}>
                   <div style={{ overflowX:'auto' }}>
                     <table style={{ width:'100%', borderCollapse:'collapse', fontSize:'12px', minWidth:'800px' }}>
                       <thead>
                         <tr style={{ background:'#1B4F72' }}>
                           <th style={{ ...th, width:'70px' }}>رقم الشقة</th>
-                          <th style={{ ...th, width:'180px', textAlign:'right', paddingRight:'12px' }}>اسم المستأجر</th>
+                          <th style={{ ...th, width:'200px', textAlign:'right', paddingRight:'12px' }}>اسم المستأجر</th>
                           <th style={{ ...th, width:'100px' }}>الإيجار</th>
                           {months.map(m=><th key={m} style={{ ...th, width:'90px' }}>{MONTHS_AR[m-1]}</th>)}
                           <th style={{ ...th, width:'110px', background:'#154360' }}>المجموع</th>
@@ -547,31 +581,43 @@ export default function ReportsPage() {
                         </tr>
                       </thead>
                       <tbody>
-                        {rentTable.map((t,i) => {
-                          const isVacant = !t.rentAmount;
+                        {rentTable.map((t,i)=>{
+                          const isVacant = !t.rentAmount && !t.totalPaid;
                           const pct = t.totalExpected>0 ? Math.round(t.totalPaid/t.totalExpected*100) : null;
                           return (
                             <tr key={i} style={{ borderBottom:'1px solid #f3f4f6', background:i%2===0?'#fafafa':'#fff' }}>
                               <td style={{ ...td, textAlign:'center', fontWeight:'700', color:'#1B4F72' }}>{t.unitNumber}</td>
-                              <td style={{ ...td, textAlign:'right', paddingRight:'12px', color:isVacant?'#9ca3af':'#111827', fontStyle:isVacant?'italic':'normal' }}>{t.name}</td>
+                              <td style={{ ...td, textAlign:'right', paddingRight:'12px' }}>
+                                <div style={{ display:'flex', alignItems:'center', gap:'4px' }}>
+                                  {t.hasMultiple && <span title="أكثر من مستأجر في هذه الفترة">👥</span>}
+                                  <span style={{ color:isVacant?'#9ca3af':'#111827', fontStyle:isVacant?'italic':'normal' }}>{t.name}</span>
+                                </div>
+                              </td>
                               <td style={{ ...td, textAlign:'center', color:'#1e40af', fontWeight:'600' }}>{t.rentAmount?fmt(t.rentAmount):''}</td>
-                              {months.map(m => {
+                              {months.map(m=>{
                                 const paid     = t.payments[m]||0;
-                                const expected = t.rentAmount||0;
+                                const expected = (() => {
+                                  // نتحقق من وجود مستأجر في هذا الشهر
+                                  const ms = new Date(y,m-1,1), me = new Date(y,m,0,23,59,59);
+                                  const ten = tenants.filter(ten => ten.unitId === units.find(u=>u.unitNumber===t.unitNumber)?.id).find(ten => {
+                                    const s = ten.contractStart?.toDate?ten.contractStart.toDate():null;
+                                    const e = ten.contractEnd?.toDate?ten.contractEnd.toDate():null;
+                                    return s&&e&&s<=me&&e>=ms;
+                                  });
+                                  return ten?.rentAmount || 0;
+                                })();
                                 let bg='transparent', color='#374151', fw:'normal'|'600'|'700'='normal';
-                                if (isVacant) { bg='#f3f4f6'; color='#9ca3af'; }
-                                else if (paid>0&&paid>=expected)  { bg='#d1fae5'; color='#065f46'; fw='700'; }
-                                else if (paid>0&&paid<expected)   { bg='#fef3c7'; color='#92400e'; fw='600'; }
-                                else if (expected>0)              { bg='#fee2e2'; color='#dc2626'; }
+                                if (!expected && !paid) { bg='#f3f4f6'; color='#9ca3af'; }
+                                else if (paid>0&&paid>=expected) { bg='#d1fae5'; color='#065f46'; fw='700'; }
+                                else if (paid>0&&paid<expected)  { bg='#fef3c7'; color='#92400e'; fw='600'; }
+                                else if (expected>0)             { bg='#fee2e2'; color='#dc2626'; }
                                 return (
                                   <td key={m} style={{ ...td, textAlign:'center', background:bg, color, fontWeight:fw }}>
-                                    {isVacant?'':paid?fmt(paid):(expected?'✗':'')}
+                                    {paid?fmt(paid):(expected?'✗':'')}
                                   </td>
                                 );
                               })}
-                              <td style={{ ...td, textAlign:'center', background:'#dbeafe', fontWeight:'700', color:'#1e40af' }}>
-                                {t.totalPaid?fmt(t.totalPaid):'—'}
-                              </td>
+                              <td style={{ ...td, textAlign:'center', background:'#dbeafe', fontWeight:'700', color:'#1e40af' }}>{t.totalPaid?fmt(t.totalPaid):'—'}</td>
                               <td style={{ ...td, textAlign:'center', background:t.balance>0?'#fee2e2':'transparent', color:t.balance>0?'#dc2626':'#16a34a', fontWeight:'600' }}>
                                 {t.balance>0?fmt(t.balance):'✓'}
                               </td>
@@ -607,9 +653,8 @@ export default function ReportsPage() {
                   </div>
                 </div>
 
-                {/* Legend */}
                 <div style={{ display:'flex', gap:'12px', flexWrap:'wrap', marginTop:'12px', fontSize:'11px', color:'#6b7280' }}>
-                  {[['#d1fae5','#065f46','مدفوع بالكامل'],['#fef3c7','#92400e','دفع جزئي'],['#fee2e2','#dc2626','لم يُدفع'],['#f3f4f6','#9ca3af','شاغرة']].map(([bg,color,label])=>(
+                  {[['#d1fae5','#065f46','مدفوع بالكامل'],['#fef3c7','#92400e','دفع جزئي'],['#fee2e2','#dc2626','لم يُدفع'],['#f3f4f6','#9ca3af','لا مستأجر']].map(([bg,color,label])=>(
                     <div key={label as string} style={{ display:'flex', alignItems:'center', gap:'5px' }}>
                       <div style={{ width:'14px', height:'14px', borderRadius:'3px', background:bg as string }}/>
                       {label}
@@ -622,20 +667,16 @@ export default function ReportsPage() {
             {/* ══ TAB: الوحدات ══ */}
             {activeTab==='units' && (
               <div>
-                {/* Period badge */}
                 <div style={{ background:'#eff6ff', border:'1px solid #bfdbfe', borderRadius:'10px', padding:'9px 14px', marginBottom:'14px', fontSize:'12px', color:'#1e40af', display:'flex', gap:'6px' }}>
-                  <span>📅</span>
-                  <span>حالة الدفع مبنية على بيانات <strong>{periodLabel}</strong></span>
+                  <span>📅</span><span>حالة الدفع مبنية على بيانات <strong>{periodLabel}</strong></span>
                 </div>
-
-                {/* KPIs */}
                 <div style={{ display:'grid', gridTemplateColumns:'repeat(5,1fr)', gap:'10px', marginBottom:'16px' }}>
                   {[
-                    { label:'مسددة',         val:unitSummary.paid,        color:'#16a34a', bg:'#d1fae5' },
-                    { label:'متأخرة',        val:unitSummary.late,        color:'#d97706', bg:'#fef3c7' },
-                    { label:'لا دفعات',      val:unitSummary.noPay,       color:'#6b7280', bg:'#f3f4f6' },
-                    { label:'شاغرة',         val:unitSummary.vacant,      color:'#dc2626', bg:'#fee2e2' },
-                    { label:'إجمالي المتأخرات', val:fmt(unitSummary.totalArrears)+' ر.س', color:'#dc2626', bg:'#fee2e2' },
+                    { label:'مسددة',           val:unitSummary.paid,        color:'#16a34a', bg:'#d1fae5' },
+                    { label:'متأخرة',          val:unitSummary.late,        color:'#d97706', bg:'#fef3c7' },
+                    { label:'لا دفعات',        val:unitSummary.noPay,       color:'#6b7280', bg:'#f3f4f6' },
+                    { label:'شاغرة',           val:unitSummary.vacant,      color:'#dc2626', bg:'#fee2e2' },
+                    { label:'إجمالي المتأخرات',val:fmt(unitSummary.totalArrears)+' ر.س', color:'#dc2626', bg:'#fee2e2' },
                   ].map(k=>(
                     <div key={k.label} style={{ background:k.bg, borderRadius:'12px', padding:'14px 10px', textAlign:'center' }}>
                       <div style={{ fontSize:'18px', fontWeight:'700', color:k.color }}>{k.val}</div>
@@ -643,22 +684,13 @@ export default function ReportsPage() {
                     </div>
                   ))}
                 </div>
-
-                {/* Pie Charts */}
                 <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:'14px', marginBottom:'16px' }}>
                   <div style={{ background:'#fff', borderRadius:'14px', border:'1px solid #e5e7eb', padding:'16px' }}>
                     <div style={{ fontSize:'13px', fontWeight:'600', color:'#374151', marginBottom:'12px' }}>توزيع حالة الدفع</div>
                     <ResponsiveContainer width="100%" height={180}>
                       <PieChart>
-                        <Pie data={[
-                          {name:'مسددة',  value:unitSummary.paid},
-                          {name:'متأخرة', value:unitSummary.late},
-                          {name:'لا دفعات',value:unitSummary.noPay},
-                          {name:'شاغرة',  value:unitSummary.vacant},
-                          {name:'صيانة',  value:unitSummary.maintenance},
-                        ].filter(d=>d.value>0)}
-                          cx="50%" cy="50%" outerRadius={70} dataKey="value"
-                          label={({ name, value }) => `${name}: ${value}`} labelLine={false}>
+                        <Pie data={[{name:'مسددة',value:unitSummary.paid},{name:'متأخرة',value:unitSummary.late},{name:'لا دفعات',value:unitSummary.noPay},{name:'شاغرة',value:unitSummary.vacant},{name:'صيانة',value:unitSummary.maintenance}].filter(d=>d.value>0)}
+                          cx="50%" cy="50%" outerRadius={70} dataKey="value" label={({name,value})=>`${name}: ${value}`} labelLine={false}>
                           {['#16a34a','#d97706','#6b7280','#dc2626','#9ca3af'].map((c,i)=><Cell key={i} fill={c}/>)}
                         </Pie><Tooltip/>
                       </PieChart>
@@ -668,26 +700,19 @@ export default function ReportsPage() {
                     <div style={{ fontSize:'13px', fontWeight:'600', color:'#374151', marginBottom:'12px' }}>توزيع أنواع الوحدات</div>
                     <ResponsiveContainer width="100%" height={180}>
                       <PieChart>
-                        <Pie data={[
-                          {name:'شهري',  value:units.filter(u=>u.type==='monthly').length},
-                          {name:'مفروش', value:units.filter(u=>u.type==='furnished').length},
-                          {name:'خاصة',  value:units.filter(u=>u.type==='owner').length},
-                        ].filter(d=>d.value>0)}
-                          cx="50%" cy="50%" outerRadius={70} dataKey="value"
-                          label={({ name, value }) => `${name}: ${value}`} labelLine={false}>
+                        <Pie data={[{name:'شهري',value:units.filter(u=>u.type==='monthly').length},{name:'مفروش',value:units.filter(u=>u.type==='furnished').length},{name:'خاصة',value:units.filter(u=>u.type==='owner').length}].filter(d=>d.value>0)}
+                          cx="50%" cy="50%" outerRadius={70} dataKey="value" label={({name,value})=>`${name}: ${value}`} labelLine={false}>
                           {['#1B4F72','#D4AC0D','#7D3C98'].map((c,i)=><Cell key={i} fill={c}/>)}
                         </Pie><Tooltip/>
                       </PieChart>
                     </ResponsiveContainer>
                   </div>
                 </div>
-
-                {/* Units Table */}
                 <div style={{ background:'#fff', borderRadius:'14px', border:'1px solid #e5e7eb', overflow:'hidden' }}>
                   <div style={{ overflowX:'auto' }}>
                     <table style={{ width:'100%', borderCollapse:'collapse', fontSize:'12px' }}>
                       <thead style={{ background:'#f9fafb' }}>
-                        <tr>{['الشقة','النوع','المستأجر','الإيجار','مدفوع في الفترة','المتأخر في الفترة','آخر دفعة','الحالة'].map(h=>(
+                        <tr>{['الشقة','النوع','المستأجر','الإيجار','مدفوع في الفترة','المتأخر','آخر دفعة','الحالة'].map(h=>(
                           <th key={h} style={{ padding:'9px 12px', textAlign:'right', color:'#6b7280', fontWeight:'500', borderBottom:'1px solid #e5e7eb', whiteSpace:'nowrap' }}>{h}</th>
                         ))}</tr>
                       </thead>
@@ -703,11 +728,9 @@ export default function ReportsPage() {
                             <td style={{ padding:'9px 12px', color:'#374151' }}>{u.tenant?.name||'—'}</td>
                             <td style={{ padding:'9px 12px' }}>{u.tenant?fmt(u.tenant.rentAmount)+' ر.س':'—'}</td>
                             <td style={{ padding:'9px 12px', color:'#16a34a', fontWeight:'600' }}>{u.totalPaid>0?fmt(u.totalPaid)+' ر.س':'—'}</td>
-                            <td style={{ padding:'9px 12px', color:u.totalBalance>0?'#dc2626':'#6b7280', fontWeight:u.totalBalance>0?'600':'400' }}>
-                              {u.totalBalance>0?fmt(u.totalBalance)+' ر.س':'✓'}
-                            </td>
+                            <td style={{ padding:'9px 12px', color:u.totalBalance>0?'#dc2626':'#6b7280', fontWeight:u.totalBalance>0?'600':'400' }}>{u.totalBalance>0?fmt(u.totalBalance)+' ر.س':'✓'}</td>
                             <td style={{ padding:'9px 12px', color:'#9ca3af', fontSize:'11px' }}>
-                              {u.lastPay?(()=>{const d=u.lastPay.paidDate?.toDate?u.lastPay.paidDate.toDate():null; return d?`${d.getDate()}/${d.getMonth()+1}/${d.getFullYear()}`:'—';})():'—'}
+                              {u.lastPay?(()=>{ const d=u.lastPay.paidDate?.toDate?u.lastPay.paidDate.toDate():null; return d?`${d.getDate()}/${d.getMonth()+1}/${d.getFullYear()}`:'—'; })():'—'}
                             </td>
                             <td style={{ padding:'9px 12px' }}>
                               <span style={{ background:u.statusBg, color:u.statusColor, padding:'2px 8px', borderRadius:'8px', fontSize:'11px', fontWeight:'600' }}>{u.statusLabel}</span>
@@ -730,13 +753,9 @@ export default function ReportsPage() {
                 </div>
               ) : (
                 <div>
-                  {/* Period badge */}
                   <div style={{ background:'#eff6ff', border:'1px solid #bfdbfe', borderRadius:'10px', padding:'9px 14px', marginBottom:'14px', fontSize:'12px', color:'#1e40af', display:'flex', gap:'6px' }}>
-                    <span>📅</span>
-                    <span>الحجوزات والإيرادات للفترة: <strong>{periodLabel}</strong></span>
+                    <span>📅</span><span>الحجوزات والإيرادات للفترة: <strong>{periodLabel}</strong></span>
                   </div>
-
-                  {/* KPIs */}
                   <div style={{ display:'grid', gridTemplateColumns:'repeat(4,1fr)', gap:'10px', marginBottom:'16px' }}>
                     {[
                       { label:'نسبة الإشغال', val:fmtPct(overallOccupancy), color:overallOccupancy>=70?'#16a34a':overallOccupancy>=50?'#d97706':'#dc2626', bg:overallOccupancy>=70?'#d1fae5':overallOccupancy>=50?'#fef3c7':'#fee2e2' },
@@ -750,8 +769,6 @@ export default function ReportsPage() {
                       </div>
                     ))}
                   </div>
-
-                  {/* Channel breakdown */}
                   {Object.keys(globalChannels).length>0 && (
                     <div style={{ background:'#fff', borderRadius:'14px', border:'1px solid #e5e7eb', padding:'16px', marginBottom:'16px' }}>
                       <div style={{ fontSize:'13px', fontWeight:'600', color:'#374151', marginBottom:'12px' }}>توزيع المنصات — {periodLabel}</div>
@@ -769,8 +786,6 @@ export default function ReportsPage() {
                       </div>
                     </div>
                   )}
-
-                  {/* Per-unit breakdown */}
                   <div style={{ display:'flex', flexDirection:'column', gap:'14px' }}>
                     {furnishedReport.map(u=>(
                       <div key={u.id} style={{ background:'#fff', borderRadius:'16px', border:'1px solid #e5e7eb', overflow:'hidden' }}>
@@ -788,7 +803,7 @@ export default function ReportsPage() {
                         <div style={{ padding:'16px' }}>
                           <div style={{ display:'grid', gridTemplateColumns:'repeat(4,1fr)', gap:'10px', marginBottom:'14px' }}>
                             {[
-                              { label:'إجمالي الإيرادات', val:fmt(u.totalRevenue)+' ر.س',  color:'#16a34a', bg:'#d1fae5' },
+                              { label:'إجمالي الإيرادات', val:fmt(u.totalRevenue)+' ر.س', color:'#16a34a', bg:'#d1fae5' },
                               { label:'إجمالي المصاريف', val:fmt(u.totalExpenses)+' ر.س', color:'#dc2626', bg:'#fee2e2' },
                               { label:'صافي الربح',       val:fmt(u.netProfit)+' ر.س',    color:'#1e40af', bg:'#dbeafe' },
                               { label:'معدل الليلة',      val:u.avgNightlyRate>0?fmt(u.avgNightlyRate)+' ر.س':'—', color:'#7c3aed', bg:'#ede9fe' },
@@ -799,8 +814,6 @@ export default function ReportsPage() {
                               </div>
                             ))}
                           </div>
-
-                          {/* Occupancy bar */}
                           <div style={{ marginBottom:'14px' }}>
                             <div style={{ display:'flex', justifyContent:'space-between', fontSize:'12px', color:'#6b7280', marginBottom:'4px' }}>
                               <span>نسبة الإشغال — {periodLabel}</span>
@@ -810,7 +823,6 @@ export default function ReportsPage() {
                               <div style={{ height:'100%', background:u.occupancyRate>=70?'#16a34a':u.occupancyRate>=50?'#d97706':'#dc2626', width:`${u.occupancyRate}%`, borderRadius:'5px' }}/>
                             </div>
                           </div>
-
                           {Object.keys(u.byChannel).length>0 && (
                             <div>
                               <div style={{ fontSize:'12px', color:'#6b7280', marginBottom:'8px', fontWeight:'500' }}>الحجوزات حسب المنصة</div>
@@ -842,7 +854,7 @@ export default function ReportsPage() {
   );
 }
 
-// ─── Styles ───────────────────────────────────────────────────────────────────
+// ─── Styles ────────────────────────────────────────────────────────────────────
 const flbl: React.CSSProperties = { display:'block', fontSize:'12px', color:'#6b7280', marginBottom:'5px', fontWeight:'500' };
 const fsel: React.CSSProperties = { width:'100%', border:'1.5px solid #e5e7eb', borderRadius:'10px', padding:'9px 12px', fontSize:'13px', background:'#fff', fontFamily:'sans-serif' };
 const th:   React.CSSProperties = { padding:'10px 8px', textAlign:'center', color:'#fff', fontWeight:'600', fontSize:'12px', whiteSpace:'nowrap', background:'#1B4F72' };
