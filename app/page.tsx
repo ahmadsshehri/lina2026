@@ -22,6 +22,7 @@ const MENU_ALL = [
   { label: 'التقارير',          sub: 'إحصاءات ومقارنات',        icon: '📊', href: '/reports',   roles: ['owner','manager','accountant'] },
   { label: 'التدفق المالي',     sub: 'تسويات · تحويلات',        icon: '💰', href: '/cashflow',  roles: ['owner','manager','accountant'] },
   { label: 'الوحدات والعقارات', sub: 'إدارة الشقق',             icon: '🏢', href: '/units',     roles: ['owner','manager'] },
+  { label:'الإيرادات الأخرى', sub:'إيرادات خارج الإيجار', icon:'💵', href:'/other-revenue', roles:['owner','manager','accountant'] },
 ];
 
 // ─── Component ────────────────────────────────────────────────────────────────
