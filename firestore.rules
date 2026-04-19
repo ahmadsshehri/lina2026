@@ -97,7 +97,14 @@ service cloud.firestore {
                     && (isOwner() || isManager());
       allow delete: if isOwner();
     }
-
+match /otherRevenue/{docId} {
+  allow read:   if isAuth() && canAccessProperty(resource.data.propertyId);
+  allow create: if isAuth() && canAccessProperty(request.resource.data.propertyId)
+                && (isOwner() || isManager());
+  allow update: if isAuth() && canAccessProperty(resource.data.propertyId)
+                && (isOwner() || isManager());
+  allow delete: if isOwner();
+}
     // ─── المصاريف ────────────────────────────────────────────────
     match /expenses/{expenseId} {
       allow read:   if isAuth()
