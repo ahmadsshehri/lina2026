@@ -684,7 +684,7 @@ export default function MonthlyPage() {
         {tab === 'schedule' && (
           <div>
             <div style={{ fontSize:'13px', color:'#6b7280', marginBottom:'14px' }}>جدول تفصيلي للدفعات المستحقة لجميع المستأجرين</div>
-            {Tenants.map(t => {
+            {tenants.map(t => {
               const tp       = payments.filter(p => p.tenantId === t.id);
               const schedule = buildPaymentSchedule(t, tp);
               if (schedule.length === 0) return null;
