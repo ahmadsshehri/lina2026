@@ -1,17 +1,26 @@
 {
-  "name": "نظام إدارة العقارات",
-  "short_name": "عقاراتي",
-  "description": "نظام متكامل لإدارة العقارات السكنية",
+  "name": "كِراءَك",
+  "short_name": "كِراءَك",
+  "description": "نظام إدارة العقارات والوحدات السكنية",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#1B4F72",
+  "orientation": "portrait",
+  "background_color": "#ffffff",
   "theme_color": "#1B4F72",
-  "orientation": "any",
   "lang": "ar",
   "dir": "rtl",
   "icons": [
-    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable" },
-    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
-  ],
-  "categories": ["business", "finance", "productivity"]
+    {
+      "src": "/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
 }
