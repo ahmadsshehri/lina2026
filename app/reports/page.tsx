@@ -67,10 +67,14 @@ export default function ReportsPage() {
       setAppUser(user);
       const props = await loadPropertiesForUser(fbUser.uid, user.role);
       setProperties(props);
-      if (props.length > 0) {
-        setPropId(props[0].id); setPropName(props[0].name);
-        await loadAllData(props[0].id, String(currentYear));
-      }
+    if (props.length > 0) {
+  const savedId = localStorage.getItem('selectedPropertyId');
+  const saved = props.find(p => p.id === savedId);
+  const selected = saved || props[0];
+  setPropId(selected.id);
+  setPropName(selected.name);
+  await loadAllData(selected.id, String(currentYear));
+}
       setLoading(false);
     });
     return unsub;
