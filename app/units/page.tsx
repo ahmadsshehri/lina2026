@@ -179,7 +179,7 @@ export default function UnitsPage() {
     <div dir="rtl" style={{ padding: '0', fontFamily: 'sans-serif', background: '#f9fafb', minHeight: '100vh' }}>
 
       {/* Top bar */}
-      <div style={{ background: '#1B4F72', padding: '16px 20px', display: 'flex', alignItems: 'center', gap: '12px', position: 'sticky', top: 0, zIndex: 50 }}>
+      <div style={{ background: 'linear-gradient(135deg,#154360 0%,#1F618D 100%)', padding: '16px 20px', display: 'flex', alignItems: 'center', gap: '12px', position: 'sticky', top: 0, zIndex: 50, boxShadow: '0 2px 12px rgba(21,67,96,0.3)' }}>
         <button onClick={() => router.push('/')} style={{ background: 'rgba(255,255,255,0.15)', border: 'none', borderRadius: '8px', padding: '8px 12px', cursor: 'pointer' }}>
           <span style={{ color: '#fff', fontSize: '18px' }}>←</span>
         </button>
