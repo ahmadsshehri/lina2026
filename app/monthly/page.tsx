@@ -413,7 +413,7 @@ export default function MonthlyPage() {
               value={searchQuery}
               onChange={e => setSearchQuery(e.target.value)}
               placeholder="ابحث برقم الشقة أو اسم المستأجر..."
-              style={{ width:'100%', border:'1.5px solid #e5e7eb', borderRadius:'12px', padding:'11px 42px 11px 14px', fontSize:'14px', fontFamily:'sans-serif', color:'#111827', background:'#f9fafb', outline:'none', boxSizing:'border-box', transition:'border-color 0.2s' }}
+              style={{ width:'100%', border:'1.5px solid #e5e7eb', borderRadius:'12px', padding:'11px 42px 11px 14px', fontSize:'14px', fontFamily:'sans-serif', color:'#111827', background:'#F5F7FA', outline:'none', boxSizing:'border-box', transition:'border-color 0.2s' }}
               onFocus={e => e.currentTarget.style.borderColor = '#1B4F72'}
               onBlur={e  => e.currentTarget.style.borderColor = '#e5e7eb'}
             />
