@@ -100,3 +100,12 @@ export function canAccess(role: string, page: string): boolean {
   const allowed = rules[role] || [];
   return allowed.includes('all') || allowed.includes(page);
 }
+/**
+ * تجلب الـ propertyId المحفوظ — أو أول عقار متاح
+ */
+export async function getSelectedPropertyId(uid: string, role: string): Promise<string> {
+  const saved = typeof window !== 'undefined' ? localStorage.getItem('selectedPropertyId') : null;
+  if (saved) return saved;
+  const props = await loadPropertiesForUser(uid, role);
+  return props[0]?.id || '';
+}
