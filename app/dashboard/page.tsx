@@ -1,4 +1,5 @@
 'use client';
+import { Suspense } from 'react';
 import { useEffect, useState } from 'react';
 import { onAuthStateChanged } from 'firebase/auth';
 import { auth, db } from '../../lib/firebase';
@@ -24,7 +25,7 @@ const MENU_ALL = [
   { label:'الإيرادات الأخرى', sub:'إيرادات خارج الإيجار',   icon:'💵', href:'/other-revenue',   roles:['owner','manager','accountant'] },
 ];
 
-export default function DashboardPage() {
+function DashboardContent() {
   const router       = useRouter();
   const searchParams = useSearchParams();
   const propertyId   = searchParams.get('propertyId');
@@ -119,7 +120,6 @@ export default function DashboardPage() {
           </button>
         </div>
 
-        {/* العقار الحالي مع زر الرجوع */}
         <div style={{ display:'flex', alignItems:'center', gap:'10px' }}>
           {properties.length > 1 && (
             <button onClick={() => router.push('/')}
@@ -170,7 +170,6 @@ export default function DashboardPage() {
           ))}
         </div>
 
-        {/* إعدادات المالك */}
         {appUser?.role === 'owner' && (
           <div style={{ marginTop:'24px' }}>
             <div style={{ fontSize:'13px', color:'#9ca3af', marginBottom:'12px', fontWeight:'500' }}>إعدادات المالك</div>
@@ -196,5 +195,18 @@ export default function DashboardPage() {
         )}
       </div>
     </div>
+  );
+}
+
+export default function DashboardPage() {
+  return (
+    <Suspense fallback={
+      <div style={{ display:'flex', justifyContent:'center', alignItems:'center', height:'100vh', background:'#f9fafb' }}>
+        <div style={{ width:'44px', height:'44px', border:'4px solid #1B4F72', borderTopColor:'transparent', borderRadius:'50%', animation:'spin 0.8s linear infinite' }}/>
+        <style>{`@keyframes spin { to { transform: rotate(360deg) } }`}</style>
+      </div>
+    }>
+      <DashboardContent />
+    </Suspense>
   );
 }
