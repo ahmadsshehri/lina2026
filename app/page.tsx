@@ -30,7 +30,7 @@ export default function HomePage() {
   const [appUser,    setAppUser]    = useState<AppUserBasic | null>(null);
   const [properties, setProperties] = useState<PropertyBasic[]>([]);
   const [activeProp, setActiveProp] = useState<PropertyBasic | null>(null);
-  const [showProppicker, setShowPropPicker] = useState(false);
+const [showPropPicker, setShowPropPicker] = useState(false);
   const [stats,      setStats]      = useState({ units:0, tenants:0, bookings:0 });
   const [error,      setError]      = useState('');
 
