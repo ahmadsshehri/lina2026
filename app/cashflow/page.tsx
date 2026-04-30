@@ -168,7 +168,7 @@ export default function CashflowPage() {
       setAppUser(user);
       const props = await loadPropertiesForUser(fbUser.uid, user.role);
       setProperties(props);
-     if (props.length > 0) {
+   if (props.length > 0) {
   const savedId = localStorage.getItem('selectedPropertyId');
   const saved = props.find(p => p.id === savedId);
   const selected = saved || props[0];
