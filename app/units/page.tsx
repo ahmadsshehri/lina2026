@@ -72,10 +72,13 @@ export default function UnitsPage() {
 
       const props = await loadPropertiesForUser(user.uid, role);
       setProperties(props);
-      if (props.length > 0) {
-        setActivePropertyId(props[0].id);
-        await loadUnits(props[0].id);
-      }
+     if (props.length > 0) {
+  const savedId = localStorage.getItem('selectedPropertyId');
+  const saved = props.find((p: any) => p.id === savedId);
+  const selected = saved || props[0];
+  setActivePropertyId(selected.id);
+  await loadUnits(selected.id);
+}
       setLoading(false);
     });
     return unsub;
