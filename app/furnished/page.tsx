@@ -343,7 +343,7 @@ export default function FurnishedPage() {
     <div dir="rtl" style={{ fontFamily:'sans-serif', background:'#f9fafb', minHeight:'100vh' }}>
 
       {/* ══ Top Bar ══ */}
-      <div style={{ background:'#1B4F72', padding:'16px 20px', display:'flex', alignItems:'center', gap:'12px', position:'sticky', top:0, zIndex:50 }}>
+     <div style={{ background:'linear-gradient(135deg,#B7950B 0%,#D4AC0D 100%)', padding:'16px 20px', display:'flex', alignItems:'center', gap:'12px', position:'sticky', top:0, zIndex:50, boxShadow:'0 2px 12px rgba(183,149,11,0.3)' }}>
         <button onClick={() => router.push('/')} style={{ background:'rgba(255,255,255,0.15)', border:'none', borderRadius:'8px', padding:'8px 12px', cursor:'pointer' }}>
           <span style={{ color:'#fff', fontSize:'18px' }}>←</span>
         </button>
