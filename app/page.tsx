@@ -44,9 +44,13 @@ const [showPropPicker, setShowPropPicker] = useState(false);
         const props = await loadPropertiesForUser(fbUser.uid, user.role);
         setProperties(props);
         if (props.length > 0) {
-          setActiveProp(props[0]);
-          await loadStats(props[0].id);
-        }
+  const savedId = localStorage.getItem('selectedPropertyId');
+  const saved = props.find(p => p.id === savedId);
+  const selected = saved || props[0];
+  setActiveProp(selected);
+  localStorage.setItem('selectedPropertyId', selected.id);
+  await loadStats(selected.id);
+}
       } catch (err: any) {
         setError('حدث خطأ: ' + err.message);
       }
@@ -71,11 +75,12 @@ const [showPropPicker, setShowPropPicker] = useState(false);
     });
   };
 
-  const switchProperty = async (prop: PropertyBasic) => {
-    setActiveProp(prop);
-    setShowPropPicker(false);
-    await loadStats(prop.id);
-  };
+ const switchProperty = async (prop: PropertyBasic) => {
+  setActiveProp(prop);
+  setShowPropPicker(false);
+  localStorage.setItem('selectedPropertyId', prop.id);
+  await loadStats(prop.id);
+};
 
   const menu = MENU_ALL.filter(m => m.roles.includes(appUser?.role || ''));
 
