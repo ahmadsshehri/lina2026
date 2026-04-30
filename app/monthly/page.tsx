@@ -372,38 +372,33 @@ export default function MonthlyPage() {
   return (
     <div dir="rtl" style={{ fontFamily:'sans-serif', background:'#f9fafb', minHeight:'100vh' }}>
 
-      {/* ══ Top Bar ══ */}
-      <div style={{ background:'#1B4F72', padding:'16px 20px', display:'flex', alignItems:'center', gap:'12px', position:'sticky', top:0, zIndex:50 }}>
-        <button onClick={() => router.push('/')} style={{ background:'rgba(255,255,255,0.15)', border:'none', borderRadius:'8px', padding:'8px 12px', cursor:'pointer' }}>
-          <span style={{ color:'#fff', fontSize:'18px' }}>←</span>
-        </button>
-        <div style={{ flex:1 }}>
-          <h1 style={{ margin:0, fontSize:'17px', fontWeight:'600', color:'#fff' }}>الإيجار الشهري</h1>
-          <p style={{ margin:0, fontSize:'12px', color:'rgba(255,255,255,0.6)' }}>
-            {activeTenants.length} مستأجر نشط
-            {expiringTenants.length > 0 && ` · ⚠️ ${expiringTenants.length} عقد يقترب`}
-          </p>
-        </div>
-        <div style={{ display:'flex', gap:'8px', alignItems:'center' }}>
-          {properties.length > 1 && (
-            <select
-              value={propId}
-              onChange={e => { setPropId(e.target.value); loadData(e.target.value); }}
-              style={{ border:'none', borderRadius:'8px', padding:'6px 10px', fontSize:'12px', background:'rgba(255,255,255,0.15)', color:'#fff' }}
-            >
-              {properties.map(p => <option key={p.id} value={p.id} style={{ color:'#000' }}>{p.name}</option>)}
-            </select>
-          )}
-          {canEdit && (
-            <button
-              onClick={openAdd}
-              style={{ background:'#D4AC0D', border:'none', borderRadius:'10px', padding:'10px 14px', cursor:'pointer', color:'#fff', fontSize:'13px', fontWeight:'600' }}
-            >
-              + مستأجر
-            </button>
-          )}
-        </div>
-      </div>
+    {/* ══ Top Bar ══ */}
+<div style={{ background:'linear-gradient(135deg,#1B4F72 0%,#2980B9 100%)', padding:'16px 20px', display:'flex', alignItems:'center', gap:'12px', position:'sticky', top:0, zIndex:50, boxShadow:'0 2px 12px rgba(27,79,114,0.3)' }}>
+  <button onClick={() => router.push('/')} style={{ background:'rgba(255,255,255,0.15)', border:'1px solid rgba(255,255,255,0.2)', borderRadius:'10px', padding:'8px 12px', cursor:'pointer' }}>
+    <span style={{ color:'#fff', fontSize:'18px' }}>←</span>
+  </button>
+  <div style={{ flex:1 }}>
+    <h1 style={{ margin:0, fontSize:'17px', fontWeight:'700', color:'#fff' }}>الإيجار الشهري</h1>
+    <p style={{ margin:0, fontSize:'12px', color:'rgba(255,255,255,0.6)' }}>
+      {activeTenants.length} مستأجر نشط
+      {expiringTenants.length > 0 && ` · ⚠️ ${expiringTenants.length} عقد يقترب`}
+    </p>
+  </div>
+  <div style={{ display:'flex', gap:'8px', alignItems:'center' }}>
+    {properties.length > 1 && (
+      <select value={propId} onChange={e => { setPropId(e.target.value); loadData(e.target.value); }}
+        style={{ border:'none', borderRadius:'10px', padding:'7px 12px', fontSize:'12px', background:'rgba(255,255,255,0.15)', color:'#fff', cursor:'pointer' }}>
+        {properties.map(p => <option key={p.id} value={p.id} style={{ color:'#000' }}>{p.name}</option>)}
+      </select>
+    )}
+    {canEdit && (
+      <button onClick={openAdd}
+        style={{ background:'#D4AC0D', border:'none', borderRadius:'10px', padding:'10px 16px', cursor:'pointer', color:'#fff', fontSize:'13px', fontWeight:'700', boxShadow:'0 2px 8px rgba(212,172,13,0.4)', fontFamily:'sans-serif' }}>
+        + مستأجر
+      </button>
+    )}
+  </div>
+</div>
 
       <div style={{ padding:'16px', maxWidth:'900px', margin:'0 auto' }}>
 
