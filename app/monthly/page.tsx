@@ -8,19 +8,7 @@ import {
 } from 'firebase/firestore';
 import { useRouter } from 'next/navigation';
 import { getCurrentUser, loadPropertiesForUser, AppUserBasic, PropertyBasic } from '../../lib/userHelpers';
-import { notify } from '../../lib/notifications';
 
-// بعد addDoc للمستأجر:
-await notify({
-  type: 'tenant_add',
-  propertyId: propId,
-  title: 'مستأجر جديد',
-  body: `تم إضافة ${tf.name} في شقة ${selectedUnit?.unitNumber}`,
-  by: appUser?.name || '—',
-  byRole: appUser?.role,
-  unitNumber: selectedUnit?.unitNumber,
-  guestOrTenant: tf.name,
-});
 // ─── Types ────────────────────────────────────────────────────────────────────
 interface Unit {
   id: string; unitNumber: string; type: string;
