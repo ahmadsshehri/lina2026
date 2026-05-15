@@ -8,6 +8,7 @@ import {
 } from 'firebase/firestore';
 import { useRouter } from 'next/navigation';
 import { getCurrentUser, loadPropertiesForUser, AppUserBasic, PropertyBasic } from '../../lib/userHelpers';
+import { notify } from '../../lib/notifications';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 interface Unit { id: string; unitNumber: string; type: string; }
@@ -35,34 +36,24 @@ const DEPOSIT_INFO: Record<string, { label: string; color: string; bg: string }>
   deducted: { label: '⚠️ مخصوم', color: '#991b1b', bg: '#fee2e2' },
 };
 
-// ─── Auto Status Logic ────────────────────────────────────────────────────────
-// قادم  = checkin من الغد فما فوق
-// وصل   = اليوم بين checkin و checkout
-// غادر  = checkout قبل اليوم
-// ملغي  = cancelled (يبقى كما هو)
 function getAutoStatus(b: Booking): string {
   if (b.status === 'cancelled') return 'cancelled';
-
   const now      = new Date();
-  const today    = new Date(now.getFullYear(), now.getMonth(), now.getDate()); // منتصف الليل اليوم
-  const tomorrow = new Date(today); tomorrow.setDate(today.getDate() + 1);
-
+  const today    = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   const checkin  = b.checkinDate?.toDate  ? b.checkinDate.toDate()  : new Date(b.checkinDate);
   const checkout = b.checkoutDate?.toDate ? b.checkoutDate.toDate() : new Date(b.checkoutDate);
-
   const checkinDay  = new Date(checkin.getFullYear(),  checkin.getMonth(),  checkin.getDate());
   const checkoutDay = new Date(checkout.getFullYear(), checkout.getMonth(), checkout.getDate());
-
-  if (checkoutDay <= today)   return 'checkedout'; // غادر
-  if (checkinDay <= today)    return 'checkedin';  // وصل (اليوم بين checkin وcheckout)
-  return 'confirmed';                               // قادم (checkin من الغد فما فوق)
+  if (checkoutDay <= today) return 'checkedout';
+  if (checkinDay <= today)  return 'checkedin';
+  return 'confirmed';
 }
 
 const STATUS_INFO: Record<string, { label: string; color: string; bg: string; dot: string }> = {
-  confirmed:  { label: '⏳ قادم', color: '#1e40af', bg: '#dbeafe',  dot: '#60a5fa' },
-  checkedin:  { label: '✅ وصل',  color: '#065f46', bg: '#d1fae5',  dot: '#34d399' },
-  checkedout: { label: '🚪 غادر', color: '#374151', bg: '#f3f4f6',  dot: '#9ca3af' },
-  cancelled:  { label: '❌ ملغي', color: '#991b1b', bg: '#fee2e2',  dot: '#f87171' },
+  confirmed:  { label: '⏳ قادم', color: '#1e40af', bg: '#dbeafe', dot: '#60a5fa' },
+  checkedin:  { label: '✅ وصل',  color: '#065f46', bg: '#d1fae5', dot: '#34d399' },
+  checkedout: { label: '🚪 غادر', color: '#374151', bg: '#f3f4f6', dot: '#9ca3af' },
+  cancelled:  { label: '❌ ملغي', color: '#991b1b', bg: '#fee2e2', dot: '#f87171' },
 };
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -95,6 +86,7 @@ export default function FurnishedPage() {
   const [appUser,    setAppUser]    = useState<AppUserBasic | null>(null);
   const [properties, setProperties] = useState<PropertyBasic[]>([]);
   const [propId,     setPropId]     = useState('');
+  const [propName,   setPropName]   = useState('');
   const [units,      setUnits]      = useState<Unit[]>([]);
   const [bookings,   setBookings]   = useState<Booking[]>([]);
   const [loading,    setLoading]    = useState(true);
@@ -102,26 +94,21 @@ export default function FurnishedPage() {
   const [editBooking,setEditBooking]= useState<Booking | null>(null);
   const [saving,     setSaving]     = useState(false);
 
-  // ── Filters ──────────────────────────────────────────────────────────────
   const [filterStatus, setFilterStatus] = useState<'all'|'confirmed'|'checkedin'|'checkedout'|'cancelled'>('all');
-  const [filterUnit,   setFilterUnit]   = useState<string>('all'); // unitId أو 'all'
+  const [filterUnit,   setFilterUnit]   = useState<string>('all');
   const [searchQuery,  setSearchQuery]  = useState('');
 
-  // ── Delete ───────────────────────────────────────────────────────────────
   const [deleteTarget,  setDeleteTarget]  = useState<Booking | null>(null);
   const [deleteReason,  setDeleteReason]  = useState('');
   const [deleteSaving,  setDeleteSaving]  = useState(false);
 
-  // ── Deposit ──────────────────────────────────────────────────────────────
   const [depositConfirm, setDepositConfirm] = useState<{ booking: Booking; action: 'returned'|'deducted' } | null>(null);
 
-  // ── Permissions ──────────────────────────────────────────────────────────
   const canAddBooking    = appUser?.role === 'owner' || appUser?.role === 'manager';
   const canReturnDeposit = appUser?.role === 'owner' || appUser?.role === 'manager' || appUser?.role === 'accountant';
   const canDeleteDirect  = appUser?.role === 'owner';
   const canRequestDelete = appUser?.role === 'manager' || appUser?.role === 'accountant';
 
-  // ── Form ─────────────────────────────────────────────────────────────────
   const EMPTY_FORM = {
     unitId:'', guestName:'', guestPhone:'', channel:'airbnb',
     checkinDate:'', checkoutDate:'', totalRevenue:'', platformFee:'0',
@@ -140,13 +127,14 @@ export default function FurnishedPage() {
       setForm(f => ({ ...f, receivedBy: user.role === 'owner' ? 'owner' : 'manager' }));
       const props = await loadPropertiesForUser(fbUser.uid, user.role);
       setProperties(props);
-  if (props.length > 0) {
-  const savedId = localStorage.getItem('selectedPropertyId');
-  const saved = props.find(p => p.id === savedId);
-  const selected = saved || props[0];
-  setPropId(selected.id);
-  await loadData(selected.id);
-}
+      if (props.length > 0) {
+        const savedId = localStorage.getItem('selectedPropertyId');
+        const saved = props.find(p => p.id === savedId);
+        const selected = saved || props[0];
+        setPropId(selected.id);
+        setPropName(selected.name);
+        await loadData(selected.id);
+      }
       setLoading(false);
     });
     return unsub;
@@ -162,23 +150,20 @@ export default function FurnishedPage() {
     setBookings(
       bSnap.docs
         .map(d => ({ id:d.id, ...d.data() } as Booking))
-        // ترتيب: قادم أولاً (الأقرب) ثم وصل ثم غادر (الأحدث أولاً)
         .sort((a, b) => {
           const sa = getAutoStatus(a);
           const sb = getAutoStatus(b);
           const order: Record<string,number> = { checkedin:0, confirmed:1, checkedout:2, cancelled:3 };
           if (order[sa] !== order[sb]) return order[sa] - order[sb];
-          // نفس الحالة: قادم → الأقرب أولاً، غادر → الأحدث أولاً
           const ca = a.checkinDate?.seconds||0;
           const cb = b.checkinDate?.seconds||0;
-          if (sa === 'confirmed') return ca - cb; // الأقرب checkin أولاً
-          return cb - ca;                          // الأحدث checkout أولاً
+          if (sa === 'confirmed') return ca - cb;
+          return cb - ca;
         })
     );
     if (u.length > 0 && !form.unitId) setForm(f => ({ ...f, unitId: u[0].id }));
   };
 
-  // ─── Calculated nights ────────────────────────────────────────────────────
   const calcNights = () => {
     if (!form.checkinDate || !form.checkoutDate) return 0;
     return Math.max(0, Math.ceil(
@@ -187,14 +172,12 @@ export default function FurnishedPage() {
   };
   const nights = calcNights();
 
-  // ─── Open Add ─────────────────────────────────────────────────────────────
   const openAdd = () => {
     setEditBooking(null);
     setForm({ ...EMPTY_FORM, unitId: units[0]?.id||'', receivedBy: appUser?.role==='owner'?'owner':'manager' });
     setShowModal(true);
   };
 
-  // ─── Open Edit — preserves all dates ──────────────────────────────────────
   const openEdit = (b: Booking) => {
     setEditBooking(b);
     setForm({
@@ -202,8 +185,8 @@ export default function FurnishedPage() {
       guestName:     b.guestName      || '',
       guestPhone:    b.guestPhone     || '',
       channel:       b.channel        || 'airbnb',
-      checkinDate:   tsToInputDate(b.checkinDate),   // ✅ تحويل صحيح
-      checkoutDate:  tsToInputDate(b.checkoutDate),  // ✅ تحويل صحيح
+      checkinDate:   tsToInputDate(b.checkinDate),
+      checkoutDate:  tsToInputDate(b.checkoutDate),
       totalRevenue:  String(b.totalRevenue  || 0),
       platformFee:   String(b.platformFee   || 0),
       depositAmount: String(b.depositAmount || 0),
@@ -224,13 +207,14 @@ export default function FurnishedPage() {
       const n            = calcNights();
       const totalRevenue = Number(form.totalRevenue);
       const platformFee  = Number(form.platformFee);
+      const netRevenue   = totalRevenue - platformFee;
       const data = {
         ...form, propertyId: propId,
         unitNumber:    unit?.unitNumber || '',
         nights:        n,
         totalRevenue,
         platformFee,
-        netRevenue:    totalRevenue - platformFee,
+        netRevenue,
         nightlyRate:   n > 0 ? totalRevenue / n : 0,
         depositAmount: Number(form.depositAmount),
         checkinDate:   Timestamp.fromDate(new Date(form.checkinDate)),
@@ -238,8 +222,34 @@ export default function FurnishedPage() {
       };
       if (editBooking) {
         await updateDoc(doc(db,'bookings',editBooking.id), data);
+        // 🔔 إشعار تعديل حجز
+        await notify({
+          type: 'booking_edit',
+          propertyId: propId,
+          propertyName: propName,
+          title: 'تم تعديل حجز',
+          body: `${form.guestName} — شقة ${unit?.unitNumber||''} · ${CHANNELS[form.channel]?.label||form.channel}`,
+          by: appUser?.name || '—',
+          byRole: appUser?.role,
+          unitNumber: unit?.unitNumber,
+          guestOrTenant: form.guestName,
+          amount: netRevenue,
+        });
       } else {
         await addDoc(collection(db,'bookings'), { ...data, createdAt: serverTimestamp() });
+        // 🔔 إشعار حجز جديد
+        await notify({
+          type: 'booking_add',
+          propertyId: propId,
+          propertyName: propName,
+          title: 'حجز جديد',
+          body: `${form.guestName} — شقة ${unit?.unitNumber||''} · ${CHANNELS[form.channel]?.label||form.channel} · ${n} ليلة`,
+          by: appUser?.name || '—',
+          byRole: appUser?.role,
+          unitNumber: unit?.unitNumber,
+          guestOrTenant: form.guestName,
+          amount: netRevenue,
+        });
       }
       await loadData(propId);
       setShowModal(false); setEditBooking(null);
@@ -253,6 +263,19 @@ export default function FurnishedPage() {
     setDeleteSaving(true);
     try {
       await deleteDoc(doc(db,'bookings',deleteTarget.id));
+      // 🔔 إشعار حذف حجز
+      await notify({
+        type: 'booking_delete',
+        propertyId: propId,
+        propertyName: propName,
+        title: 'تم حذف حجز',
+        body: `${deleteTarget.guestName} — شقة ${deleteTarget.unitNumber} · ${CHANNELS[deleteTarget.channel]?.label||deleteTarget.channel}`,
+        by: appUser?.name || '—',
+        byRole: appUser?.role,
+        unitNumber: deleteTarget.unitNumber,
+        guestOrTenant: deleteTarget.guestName,
+        amount: deleteTarget.netRevenue,
+      });
       await loadData(propId);
       setDeleteTarget(null); setDeleteReason('');
     } catch (e) { alert('حدث خطأ'); }
@@ -302,26 +325,18 @@ export default function FurnishedPage() {
   const filteredBookings = useMemo(() => {
     return bookings.filter(b => {
       const autoStatus = getAutoStatus(b);
-
-      // Filter by status
       if (filterStatus !== 'all' && autoStatus !== filterStatus) return false;
-
-      // Filter by unit
       if (filterUnit !== 'all' && b.unitId !== filterUnit) return false;
-
-      // Search by guest name or unit number
       if (searchQuery.trim()) {
         const q = searchQuery.trim().toLowerCase();
         const matchGuest = b.guestName?.toLowerCase().includes(q);
         const matchUnit  = b.unitNumber?.toLowerCase().includes(q);
         if (!matchGuest && !matchUnit) return false;
       }
-
       return true;
     });
   }, [bookings, filterStatus, filterUnit, searchQuery]);
 
-  // ─── Derived stats ────────────────────────────────────────────────────────
   const bookingsWithStatus = useMemo(() => bookings.map(b => ({ ...b, autoStatus: getAutoStatus(b) })), [bookings]);
   const activeBookings     = bookings.filter(b => b.status !== 'cancelled');
   const checkedinCount     = bookingsWithStatus.filter(b => b.autoStatus==='checkedin').length;
@@ -330,7 +345,6 @@ export default function FurnishedPage() {
   const pendingDeletes     = bookings.filter(b => b.deleteRequested).length;
   const totalRevenue       = activeBookings.reduce((s,b) => s+(b.netRevenue||0), 0);
 
-  // ─── Loading ──────────────────────────────────────────────────────────────
   if (loading) return (
     <div style={{ display:'flex', justifyContent:'center', alignItems:'center', height:'100vh' }}>
       <div style={{ width:'40px', height:'40px', border:'3px solid #1B4F72', borderTopColor:'transparent', borderRadius:'50%', animation:'spin 0.8s linear infinite' }}/>
@@ -338,18 +352,17 @@ export default function FurnishedPage() {
     </div>
   );
 
-  // ─── Render ───────────────────────────────────────────────────────────────
   return (
     <div dir="rtl" style={{ fontFamily:'sans-serif', background:'#f9fafb', minHeight:'100vh' }}>
 
       {/* ══ Top Bar ══ */}
-     <div style={{ background:'linear-gradient(135deg,#B7950B 0%,#D4AC0D 100%)', padding:'16px 20px', display:'flex', alignItems:'center', gap:'12px', position:'sticky', top:0, zIndex:50, boxShadow:'0 2px 12px rgba(183,149,11,0.3)' }}>
+      <div style={{ background:'linear-gradient(135deg,#B7950B 0%,#D4AC0D 100%)', padding:'16px 20px', display:'flex', alignItems:'center', gap:'12px', position:'sticky', top:0, zIndex:50, boxShadow:'0 2px 12px rgba(183,149,11,0.3)' }}>
         <button onClick={() => router.push('/')} style={{ background:'rgba(255,255,255,0.15)', border:'none', borderRadius:'8px', padding:'8px 12px', cursor:'pointer' }}>
           <span style={{ color:'#fff', fontSize:'18px' }}>←</span>
         </button>
         <div style={{ flex:1 }}>
           <h1 style={{ margin:0, fontSize:'17px', fontWeight:'600', color:'#fff' }}>الشقق المفروشة</h1>
-          <p style={{ margin:0, fontSize:'12px', color:'rgba(255,255,255,0.6)' }}>
+          <p style={{ margin:0, fontSize:'12px', color:'rgba(255,255,255,0.7)' }}>
             {checkedinCount>0 && `✅ ${checkedinCount} وصل · `}
             {upcomingCount>0  && `⏳ ${upcomingCount} قادم · `}
             {pendingDeposits>0 && `🔒 ${pendingDeposits} تأمين معلق`}
@@ -358,13 +371,18 @@ export default function FurnishedPage() {
         </div>
         <div style={{ display:'flex', gap:'8px', alignItems:'center' }}>
           {properties.length>1 && (
-            <select value={propId} onChange={e=>{setPropId(e.target.value);loadData(e.target.value);}}
+            <select value={propId} onChange={e=>{
+              const p = properties.find(x => x.id===e.target.value);
+              setPropId(e.target.value);
+              setPropName(p?.name||'');
+              loadData(e.target.value);
+            }}
               style={{ border:'none', borderRadius:'8px', padding:'6px 10px', fontSize:'12px', background:'rgba(255,255,255,0.15)', color:'#fff' }}>
               {properties.map(p=><option key={p.id} value={p.id} style={{ color:'#000' }}>{p.name}</option>)}
             </select>
           )}
           {canAddBooking && (
-            <button onClick={openAdd} style={{ background:'#D4AC0D', border:'none', borderRadius:'10px', padding:'10px 16px', cursor:'pointer', color:'#fff', fontSize:'13px', fontWeight:'600', fontFamily:'sans-serif' }}>
+            <button onClick={openAdd} style={{ background:'rgba(255,255,255,0.2)', border:'1px solid rgba(255,255,255,0.3)', borderRadius:'10px', padding:'10px 16px', cursor:'pointer', color:'#fff', fontSize:'13px', fontWeight:'600', fontFamily:'sans-serif' }}>
               + حجز
             </button>
           )}
@@ -373,14 +391,14 @@ export default function FurnishedPage() {
 
       <div style={{ padding:'16px', maxWidth:'720px', margin:'0 auto' }}>
 
-        {/* ══ Delete Requests Alert — Owner Only ══ */}
+        {/* Delete Requests Alert */}
         {canDeleteDirect && pendingDeletes>0 && (
           <div style={{ background:'#fef3c7', border:'1px solid #fbbf24', borderRadius:'12px', padding:'14px 16px', marginBottom:'16px' }}>
             <div style={{ fontSize:'13px', fontWeight:'600', color:'#92400e' }}>⏳ {pendingDeletes} طلب حذف معلق يحتاج مراجعتك</div>
           </div>
         )}
 
-        {/* ══ KPIs ══ */}
+        {/* KPIs */}
         <div style={{ display:'grid', gridTemplateColumns:'repeat(4,1fr)', gap:'10px', marginBottom:'16px' }}>
           {[
             { label:'إجمالي الإيرادات', val:fmt(totalRevenue)+' ر.س', color:'#16a34a', bg:'#d1fae5' },
@@ -395,35 +413,28 @@ export default function FurnishedPage() {
           ))}
         </div>
 
-        {/* ══ Search & Filter Bar ══ */}
+        {/* Search & Filter Bar */}
         <div style={{ background:'#fff', borderRadius:'16px', border:'1px solid #e5e7eb', padding:'16px', marginBottom:'16px', display:'flex', flexDirection:'column', gap:'12px' }}>
-
-          {/* Search */}
           <div style={{ position:'relative' }}>
             <span style={{ position:'absolute', right:'14px', top:'50%', transform:'translateY(-50%)', fontSize:'16px', color:'#9ca3af', pointerEvents:'none' }}>🔍</span>
-            <input
-              type="text"
-              value={searchQuery}
-              onChange={e => setSearchQuery(e.target.value)}
+            <input type="text" value={searchQuery} onChange={e => setSearchQuery(e.target.value)}
               placeholder="ابحث باسم الضيف أو رقم الشقة..."
               style={{ width:'100%', border:'1.5px solid #e5e7eb', borderRadius:'12px', padding:'11px 42px 11px 14px', fontSize:'14px', fontFamily:'sans-serif', color:'#111827', background:'#f9fafb', outline:'none', boxSizing:'border-box' }}
               onFocus={e => e.currentTarget.style.borderColor='#1B4F72'}
-              onBlur={e  => e.currentTarget.style.borderColor='#e5e7eb'}
-            />
+              onBlur={e  => e.currentTarget.style.borderColor='#e5e7eb'} />
             {searchQuery && (
               <button onClick={() => setSearchQuery('')}
                 style={{ position:'absolute', left:'12px', top:'50%', transform:'translateY(-50%)', background:'none', border:'none', cursor:'pointer', fontSize:'18px', color:'#9ca3af' }}>×</button>
             )}
           </div>
 
-          {/* Status Filter */}
           <div style={{ display:'flex', gap:'4px', background:'#f3f4f6', borderRadius:'10px', padding:'4px' }}>
             {([
-              { val:'all',        label:'الكل',       dot:'' },
-              { val:'checkedin',  label:'✅ وصل',      dot:'#34d399' },
-              { val:'confirmed',  label:'⏳ قادم',     dot:'#60a5fa' },
-              { val:'checkedout', label:'🚪 غادر',     dot:'#9ca3af' },
-              { val:'cancelled',  label:'❌ ملغي',     dot:'#f87171' },
+              { val:'all', label:'الكل' },
+              { val:'checkedin', label:'✅ وصل' },
+              { val:'confirmed', label:'⏳ قادم' },
+              { val:'checkedout', label:'🚪 غادر' },
+              { val:'cancelled', label:'❌ ملغي' },
             ] as const).map(f=>(
               <button key={f.val} onClick={() => setFilterStatus(f.val)}
                 style={{ flex:1, padding:'6px 4px', borderRadius:'8px', border:'none', cursor:'pointer', fontSize:'11px', fontWeight:filterStatus===f.val?'700':'400', background:filterStatus===f.val?'#fff':'transparent', color:filterStatus===f.val?'#1B4F72':'#6b7280', boxShadow:filterStatus===f.val?'0 1px 3px rgba(0,0,0,0.1)':'none', transition:'all 0.15s', fontFamily:'sans-serif', whiteSpace:'nowrap' }}>
@@ -432,7 +443,6 @@ export default function FurnishedPage() {
             ))}
           </div>
 
-          {/* Unit Filter Chips */}
           {units.length > 0 && (
             <div style={{ display:'flex', gap:'6px', flexWrap:'wrap', alignItems:'center' }}>
               <span style={{ fontSize:'11px', color:'#9ca3af', whiteSpace:'nowrap' }}>شقة:</span>
@@ -442,8 +452,7 @@ export default function FurnishedPage() {
               </button>
               {units.sort((a,b) => a.unitNumber.localeCompare(b.unitNumber,undefined,{numeric:true})).map(u => {
                 const uBookings = bookingsWithStatus.filter(b => b.unitId===u.id && b.autoStatus!=='cancelled');
-                const activeB   = uBookings.find(b => b.autoStatus==='checkedin');
-                const hasActive = !!activeB;
+                const hasActive = !!uBookings.find(b => b.autoStatus==='checkedin');
                 const isSelected = filterUnit===u.id;
                 return (
                   <button key={u.id} onClick={() => setFilterUnit(isSelected?'all':u.id)}
@@ -456,7 +465,6 @@ export default function FurnishedPage() {
             </div>
           )}
 
-          {/* Results count + clear */}
           {(searchQuery || filterStatus!=='all' || filterUnit!=='all') && (
             <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center' }}>
               <span style={{ fontSize:'12px', color:'#6b7280' }}>{filteredBookings.length} نتيجة</span>
@@ -468,16 +476,12 @@ export default function FurnishedPage() {
           )}
         </div>
 
-        {/* ══ Bookings List ══ */}
+        {/* Bookings List */}
         {filteredBookings.length===0 ? (
           <div style={{ background:'#fff', borderRadius:'16px', padding:'40px', textAlign:'center', border:'1px solid #e5e7eb' }}>
-            <div style={{ fontSize:'48px', marginBottom:'12px' }}>
-              {searchQuery||filterStatus!=='all'||filterUnit!=='all' ? '🔍' : '🏨'}
-            </div>
+            <div style={{ fontSize:'48px', marginBottom:'12px' }}>{searchQuery||filterStatus!=='all'||filterUnit!=='all' ? '🔍' : '🏨'}</div>
             <p style={{ color:'#6b7280', fontSize:'14px', margin:'0 0 16px' }}>
-              {searchQuery||filterStatus!=='all'||filterUnit!=='all'
-                ? `لا توجد نتائج مطابقة`
-                : 'لا توجد حجوزات'}
+              {searchQuery||filterStatus!=='all'||filterUnit!=='all' ? 'لا توجد نتائج مطابقة' : 'لا توجد حجوزات'}
             </p>
             {(searchQuery||filterStatus!=='all'||filterUnit!=='all') ? (
               <button onClick={() => { setSearchQuery(''); setFilterStatus('all'); setFilterUnit('all'); }}
@@ -492,20 +496,17 @@ export default function FurnishedPage() {
           <div style={{ display:'flex', flexDirection:'column', gap:'12px' }}>
             {filteredBookings.map(b => {
               const autoStatus = getAutoStatus(b);
-              const ch   = CHANNELS[b.channel]        || CHANNELS.other;
-              const st   = STATUS_INFO[autoStatus]     || STATUS_INFO.confirmed;
-              const dp   = DEPOSIT_INFO[b.depositStatus] || DEPOSIT_INFO.held;
-              const rcv  = b.receivedBy==='owner'
+              const ch  = CHANNELS[b.channel]          || CHANNELS.other;
+              const st  = STATUS_INFO[autoStatus]       || STATUS_INFO.confirmed;
+              const dp  = DEPOSIT_INFO[b.depositStatus] || DEPOSIT_INFO.held;
+              const rcv = b.receivedBy==='owner'
                 ? { label:'المالك',   color:'#7c3aed', bg:'#ede9fe', icon:'👑' }
                 : { label:'المسؤول', color:'#1e40af', bg:'#dbeafe', icon:'👤' };
-
-              const daysIn  = daysUntilCheckin(b.checkinDate);
-              const isToday = autoStatus === 'checkedin';
+              const daysIn = daysUntilCheckin(b.checkinDate);
 
               return (
                 <div key={b.id} style={{ background:'#fff', borderRadius:'16px', border:`2px solid ${b.deleteRequested?'#fca5a5':autoStatus==='checkedin'?'#34d399':autoStatus==='confirmed'&&daysIn<=3?'#fbbf24':'#e5e7eb'}`, overflow:'hidden' }}>
 
-                  {/* Delete Request Banner */}
                   {b.deleteRequested && (
                     <div style={{ background:'#fee2e2', padding:'8px 16px', fontSize:'12px', color:'#dc2626', fontWeight:'600', display:'flex', justifyContent:'space-between', alignItems:'center', borderBottom:'1px solid #fca5a5' }}>
                       <span>🔴 طلب حذف من {b.deleteRequestedBy}</span>
@@ -518,11 +519,8 @@ export default function FurnishedPage() {
                     </div>
                   )}
 
-                  {/* Today checkin alert */}
                   {autoStatus==='confirmed' && daysIn===0 && (
-                    <div style={{ background:'#fef3c7', padding:'7px 16px', fontSize:'12px', color:'#92400e', fontWeight:'600', borderBottom:'1px solid #fbbf24' }}>
-                      ⏰ وصول اليوم!
-                    </div>
+                    <div style={{ background:'#fef3c7', padding:'7px 16px', fontSize:'12px', color:'#92400e', fontWeight:'600', borderBottom:'1px solid #fbbf24' }}>⏰ وصول اليوم!</div>
                   )}
                   {autoStatus==='confirmed' && daysIn>0 && daysIn<=3 && (
                     <div style={{ background:'#eff6ff', padding:'7px 16px', fontSize:'12px', color:'#1e40af', fontWeight:'600', borderBottom:'1px solid #bfdbfe' }}>
@@ -530,7 +528,6 @@ export default function FurnishedPage() {
                     </div>
                   )}
 
-                  {/* Header */}
                   <div style={{ padding:'14px 16px', borderBottom:'1px solid #f3f4f6', display:'flex', alignItems:'center', gap:'10px' }}>
                     <div style={{ width:'10px', height:'10px', borderRadius:'50%', background:ch.color, flexShrink:0 }}/>
                     <div style={{ flex:1 }}>
@@ -538,11 +535,9 @@ export default function FurnishedPage() {
                       <div style={{ fontSize:'12px', color:'#6b7280' }}>{b.guestPhone||'—'}</div>
                     </div>
                     <span style={{ background:ch.bg, color:ch.color, padding:'4px 10px', borderRadius:'20px', fontSize:'11px', fontWeight:'600' }}>{ch.label}</span>
-                    {/* Auto Status Badge */}
                     <span style={{ background:st.bg, color:st.color, padding:'4px 10px', borderRadius:'20px', fontSize:'11px', fontWeight:'700' }}>{st.label}</span>
                   </div>
 
-                  {/* Body */}
                   <div style={{ padding:'14px 16px' }}>
                     <div style={{ display:'grid', gridTemplateColumns:'repeat(4,1fr)', gap:'10px', marginBottom:'12px' }}>
                       <div style={{ textAlign:'center' }}>
@@ -564,7 +559,6 @@ export default function FurnishedPage() {
                       </div>
                     </div>
 
-                    {/* Receiver + Deposit */}
                     <div style={{ display:'flex', gap:'8px', flexWrap:'wrap', marginBottom:'12px', alignItems:'center' }}>
                       {b.receivedBy && (
                         <span style={{ background:rcv.bg, color:rcv.color, padding:'4px 10px', borderRadius:'10px', fontSize:'11px', fontWeight:'600', display:'flex', alignItems:'center', gap:'4px' }}>
@@ -594,22 +588,17 @@ export default function FurnishedPage() {
                       )}
                     </div>
 
-                    {/* Action Buttons */}
                     <div style={{ display:'flex', gap:'8px', flexWrap:'wrap' }}>
                       <button onClick={() => openEdit(b)}
                         style={{ padding:'9px 16px', background:'#fff', border:'1px solid #e5e7eb', borderRadius:'8px', cursor:'pointer', fontSize:'13px', fontFamily:'sans-serif' }}>
                         ✏️ تعديل
                       </button>
-
-                      {/* Cancel button for upcoming */}
                       {autoStatus==='confirmed' && (
                         <button onClick={async () => { await updateDoc(doc(db,'bookings',b.id),{status:'cancelled'}); await loadData(propId); }}
                           style={{ padding:'9px 14px', background:'#fee2e2', color:'#dc2626', border:'none', borderRadius:'8px', cursor:'pointer', fontSize:'12px', fontFamily:'sans-serif' }}>
                           ❌ إلغاء
                         </button>
                       )}
-
-                      {/* Delete */}
                       {canDeleteDirect && !b.deleteRequested && (
                         <button onClick={() => setDeleteTarget(b)}
                           style={{ padding:'9px 12px', background:'#fee2e2', color:'#dc2626', border:'1px solid #fca5a5', borderRadius:'8px', cursor:'pointer', fontSize:'13px', fontFamily:'sans-serif' }}>
@@ -634,29 +623,23 @@ export default function FurnishedPage() {
         )}
       </div>
 
-      {/* ══ Modal: إضافة/تعديل حجز ══ */}
+      {/* Modal: إضافة/تعديل حجز */}
       {showModal && (
         <div style={{ position:'fixed', inset:'0', background:'rgba(0,0,0,0.6)', display:'flex', alignItems:'flex-end', justifyContent:'center', zIndex:1000 }}
           onClick={() => setShowModal(false)}>
           <div style={{ background:'#fff', borderRadius:'20px 20px 0 0', padding:'24px', width:'100%', maxWidth:'500px', maxHeight:'90vh', overflowY:'auto' }}
             onClick={e => e.stopPropagation()}>
-
             <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:'20px' }}>
               <h2 style={{ margin:0, fontSize:'17px', color:'#1B4F72', fontWeight:'600' }}>{editBooking?'تعديل حجز':'حجز جديد'}</h2>
               <button onClick={() => setShowModal(false)} style={{ border:'none', background:'#f3f4f6', borderRadius:'50%', width:'32px', height:'32px', cursor:'pointer', fontSize:'16px' }}>✕</button>
             </div>
-
             <div style={{ display:'flex', flexDirection:'column', gap:'14px' }}>
-
-              {/* الشقة */}
               <div>
                 <label style={lbl}>الشقة</label>
                 <select value={form.unitId} onChange={e => setForm(f=>({...f,unitId:e.target.value}))} style={inp}>
                   {units.map(u=><option key={u.id} value={u.id}>شقة {u.unitNumber}</option>)}
                 </select>
               </div>
-
-              {/* المنصة */}
               <div>
                 <label style={lbl}>المنصة</label>
                 <div style={{ display:'grid', gridTemplateColumns:'repeat(3,1fr)', gap:'8px' }}>
@@ -668,14 +651,10 @@ export default function FurnishedPage() {
                   ))}
                 </div>
               </div>
-
-              {/* الضيف */}
               <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:'12px' }}>
                 <div><label style={lbl}>اسم الضيف</label><input value={form.guestName} onChange={e=>setForm(f=>({...f,guestName:e.target.value}))} style={inp}/></div>
                 <div><label style={lbl}>رقم الجوال</label><input value={form.guestPhone} onChange={e=>setForm(f=>({...f,guestPhone:e.target.value}))} style={inp}/></div>
               </div>
-
-              {/* التواريخ */}
               <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:'12px' }}>
                 <div><label style={lbl}>تاريخ الوصول</label><input type="date" value={form.checkinDate} onChange={e=>setForm(f=>({...f,checkinDate:e.target.value}))} style={inp}/></div>
                 <div><label style={lbl}>تاريخ المغادرة</label><input type="date" value={form.checkoutDate} onChange={e=>setForm(f=>({...f,checkoutDate:e.target.value}))} style={inp}/></div>
@@ -683,8 +662,6 @@ export default function FurnishedPage() {
               {nights>0 && (
                 <div style={{ background:'#dbeafe', borderRadius:'10px', padding:'10px', textAlign:'center', fontSize:'14px', color:'#1e40af', fontWeight:'600' }}>{nights} ليلة</div>
               )}
-
-              {/* الإيرادات */}
               <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:'12px' }}>
                 <div><label style={lbl}>الإيراد الإجمالي (ر.س)</label><input type="number" value={form.totalRevenue} onChange={e=>setForm(f=>({...f,totalRevenue:e.target.value}))} style={inp}/></div>
                 <div><label style={lbl}>عمولة المنصة (ر.س)</label><input type="number" value={form.platformFee} onChange={e=>setForm(f=>({...f,platformFee:e.target.value}))} style={inp}/></div>
@@ -698,8 +675,6 @@ export default function FurnishedPage() {
                   </select>
                 </div>
               </div>
-
-              {/* مستلم المبلغ */}
               <div>
                 <label style={{ ...lbl, fontWeight:'600' }}>💰 من استلم المبلغ؟</label>
                 <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:'8px' }}>
@@ -712,11 +687,7 @@ export default function FurnishedPage() {
                   ))}
                 </div>
               </div>
-
-              {/* ملاحظات */}
               <div><label style={lbl}>ملاحظات</label><textarea value={form.notes} onChange={e=>setForm(f=>({...f,notes:e.target.value}))} rows={2} style={{ ...inp, resize:'none' }}/></div>
-
-              {/* صافي محسوب */}
               {form.totalRevenue && (
                 <div style={{ background:'#f0fdf4', borderRadius:'10px', padding:'10px 14px', display:'flex', justifyContent:'space-between' }}>
                   <span style={{ fontSize:'13px', color:'#6b7280' }}>صافي الإيراد المحسوب</span>
@@ -726,7 +697,6 @@ export default function FurnishedPage() {
                 </div>
               )}
             </div>
-
             <div style={{ display:'flex', gap:'10px', marginTop:'24px' }}>
               <button onClick={saveBooking} disabled={saving}
                 style={{ flex:1, padding:'13px', background:saving?'#9ca3af':'#1B4F72', color:'#fff', border:'none', borderRadius:'12px', cursor:saving?'not-allowed':'pointer', fontSize:'15px', fontWeight:'600', fontFamily:'sans-serif' }}>
@@ -741,7 +711,7 @@ export default function FurnishedPage() {
         </div>
       )}
 
-      {/* ══ Modal: حذف ══ */}
+      {/* Modal: حذف */}
       {deleteTarget && (
         <div style={{ position:'fixed', inset:'0', background:'rgba(0,0,0,0.6)', display:'flex', alignItems:'center', justifyContent:'center', zIndex:1000 }}>
           <div style={{ background:'#fff', borderRadius:'16px', padding:'24px', width:'420px', maxWidth:'95vw' }}>
@@ -798,7 +768,7 @@ export default function FurnishedPage() {
         </div>
       )}
 
-      {/* ══ Modal: تأكيد التأمين ══ */}
+      {/* Modal: تأكيد التأمين */}
       {depositConfirm && (
         <div style={{ position:'fixed', inset:'0', background:'rgba(0,0,0,0.6)', display:'flex', alignItems:'center', justifyContent:'center', zIndex:1000 }}>
           <div style={{ background:'#fff', borderRadius:'16px', padding:'24px', width:'380px', maxWidth:'95vw', textAlign:'center' }}>
@@ -819,12 +789,10 @@ export default function FurnishedPage() {
           </div>
         </div>
       )}
-
     </div>
   );
 }
 
-// ─── Styles ───────────────────────────────────────────────────────────────────
 const lbl: React.CSSProperties = { display:'block', fontSize:'13px', color:'#374151', marginBottom:'6px', fontWeight:'500' };
 const inp: React.CSSProperties = { width:'100%', border:'1.5px solid #e5e7eb', borderRadius:'10px', padding:'11px 14px', fontSize:'14px', boxSizing:'border-box', background:'#fff', fontFamily:'sans-serif' };
 const btn1: React.CSSProperties = { padding:'10px 20px', background:'#1B4F72', color:'#fff', border:'none', borderRadius:'10px', cursor:'pointer', fontSize:'14px', fontFamily:'sans-serif' };
