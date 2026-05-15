@@ -1,10 +1,11 @@
 'use client';
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import { onAuthStateChanged } from 'firebase/auth';
 import { auth, db } from '../lib/firebase';
 import { collection, getDocs, query, where } from 'firebase/firestore';
 import { useRouter } from 'next/navigation';
 import { getCurrentUser, loadPropertiesForUser, AppUserBasic, PropertyBasic } from '../lib/userHelpers';
+import { loadNotifications, markAllRead, NotifDoc, NOTIF_META } from '../lib/notifications';
 
 const ROLE_LABEL: Record<string, string> = {
   owner:       'مالك العقار',
@@ -56,6 +57,17 @@ const MENU_ALL = [
   },
 ];
 
+function fmtTime(ts: any): string {
+  if (!ts) return '';
+  const d = ts?.toDate ? ts.toDate() : new Date(ts);
+  const now = new Date();
+  const diff = Math.floor((now.getTime() - d.getTime()) / 1000);
+  if (diff < 60)   return 'الآن';
+  if (diff < 3600) return `منذ ${Math.floor(diff/60)} د`;
+  if (diff < 86400)return `منذ ${Math.floor(diff/3600)} س`;
+  return `${d.getDate()}/${d.getMonth()+1}`;
+}
+
 export default function HomePage() {
   const router = useRouter();
   const [loading,        setLoading]        = useState(true);
@@ -65,6 +77,13 @@ export default function HomePage() {
   const [showPropPicker, setShowPropPicker] = useState(false);
   const [stats,          setStats]          = useState({ units:0, tenants:0, bookings:0 });
   const [error,          setError]          = useState('');
+
+  // ── Notifications state ──────────────────────────────────────────────────
+  const [notifs,       setNotifs]       = useState<NotifDoc[]>([]);
+  const [showNotifs,   setShowNotifs]   = useState(false);
+  const bellRef = useRef<HTMLDivElement>(null);
+
+  const unreadCount = notifs.filter(n => !n.read).length;
 
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, async (fbUser) => {
@@ -81,12 +100,26 @@ export default function HomePage() {
           const selected = saved || props[0];
           setActiveProp(selected);
           localStorage.setItem('selectedPropertyId', selected.id);
-          await loadStats(selected.id);
+          await Promise.all([
+            loadStats(selected.id),
+            loadNotifs(selected.id),
+          ]);
         }
       } catch (err: any) { setError('حدث خطأ: ' + err.message); }
       setLoading(false);
     });
     return unsub;
+  }, []);
+
+  // إغلاق panel الإشعارات عند الضغط خارجه
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (bellRef.current && !bellRef.current.contains(e.target as Node)) {
+        setShowNotifs(false);
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
   }, []);
 
   const loadStats = async (pid: string) => {
@@ -105,11 +138,25 @@ export default function HomePage() {
     });
   };
 
+  const loadNotifs = async (pid: string) => {
+    const data = await loadNotifications(pid);
+    setNotifs(data);
+  };
+
+  const handleBellClick = async () => {
+    setShowNotifs(v => !v);
+    // عند فتح القائمة — علّم كل غير مقروء
+    if (!showNotifs && activeProp && unreadCount > 0) {
+      await markAllRead(activeProp.id);
+      setNotifs(prev => prev.map(n => ({ ...n, read: true })));
+    }
+  };
+
   const switchProperty = async (prop: PropertyBasic) => {
     setActiveProp(prop);
     setShowPropPicker(false);
     localStorage.setItem('selectedPropertyId', prop.id);
-    await loadStats(prop.id);
+    await Promise.all([loadStats(prop.id), loadNotifs(prop.id)]);
   };
 
   const getStatVal = (key: string) => {
@@ -145,12 +192,13 @@ export default function HomePage() {
 
   return (
     <div dir="rtl" style={{ fontFamily:'sans-serif', background:'#F5F7FA', minHeight:'100vh', paddingBottom:'80px' }}>
-      <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
+      <style>{`@keyframes spin{to{transform:rotate(360deg)}} @keyframes slideDown{from{opacity:0;transform:translateY(-8px)}to{opacity:1;transform:translateY(0)}}`}</style>
 
-      {/* HEADER */}
+      {/* ══ HEADER ══ */}
       <div style={{ background:'linear-gradient(145deg,#1B4F72 0%,#2980B9 70%,#5DADE2 100%)', padding:'38px 22px 70px', position:'relative', overflow:'hidden' }}>
         <div style={{ position:'absolute', top:'-50px', right:'-50px', width:'180px', height:'180px', background:'rgba(255,255,255,0.06)', borderRadius:'50%' }}/>
         <div style={{ position:'absolute', top:'20px', left:'-30px', width:'100px', height:'100px', background:'rgba(212,172,13,0.1)', borderRadius:'50%' }}/>
+
         <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', marginBottom:'18px', position:'relative', zIndex:1 }}>
           <div>
             <div style={{ fontSize:'12px', color:'rgba(255,255,255,0.5)', marginBottom:'2px' }}>صباح الخير،</div>
@@ -160,11 +208,85 @@ export default function HomePage() {
               {ROLE_LABEL[appUser?.role || ''] || appUser?.role}
             </div>
           </div>
-          <button onClick={() => auth.signOut().then(() => router.push('/login'))}
-            style={{ background:'rgba(255,255,255,0.12)', border:'1px solid rgba(255,255,255,0.2)', color:'rgba(255,255,255,0.75)', fontSize:'11px', padding:'7px 14px', borderRadius:'12px', cursor:'pointer', fontFamily:'sans-serif' }}>
-            خروج
-          </button>
+
+          {/* أزرار يمين الهيدر */}
+          <div style={{ display:'flex', gap:'8px', alignItems:'center' }}>
+
+            {/* 🔔 جرس الإشعارات */}
+            <div ref={bellRef} style={{ position:'relative' }}>
+              <button
+                onClick={handleBellClick}
+                style={{ background:'rgba(255,255,255,0.12)', border:'1px solid rgba(255,255,255,0.2)', borderRadius:'12px', padding:'8px 10px', cursor:'pointer', position:'relative', display:'flex', alignItems:'center', justifyContent:'center' }}
+              >
+                <span style={{ fontSize:'20px' }}>🔔</span>
+                {unreadCount > 0 && (
+                  <div style={{ position:'absolute', top:'-4px', left:'-4px', background:'#ef4444', color:'#fff', borderRadius:'50%', width:'20px', height:'20px', display:'flex', alignItems:'center', justifyContent:'center', fontSize:'11px', fontWeight:'700', border:'2px solid #1B4F72' }}>
+                    {unreadCount > 9 ? '9+' : unreadCount}
+                  </div>
+                )}
+              </button>
+
+              {/* Panel الإشعارات */}
+              {showNotifs && (
+                <div style={{ position:'absolute', top:'48px', left:'0', width:'320px', maxWidth:'90vw', background:'#fff', borderRadius:'16px', boxShadow:'0 8px 32px rgba(0,0,0,0.18)', border:'1px solid #e5e7eb', zIndex:200, animation:'slideDown 0.2s ease', overflow:'hidden' }}>
+                  <div style={{ padding:'14px 16px', borderBottom:'1px solid #f3f4f6', display:'flex', justifyContent:'space-between', alignItems:'center', background:'#f8fafc' }}>
+                    <span style={{ fontSize:'14px', fontWeight:'700', color:'#1B4F72' }}>الإشعارات</span>
+                    <span style={{ fontSize:'12px', color:'#9ca3af' }}>{notifs.length} إشعار</span>
+                  </div>
+                  <div style={{ maxHeight:'380px', overflowY:'auto' }}>
+                    {notifs.length === 0 ? (
+                      <div style={{ padding:'32px', textAlign:'center' }}>
+                        <div style={{ fontSize:'36px', marginBottom:'8px' }}>🔔</div>
+                        <p style={{ color:'#9ca3af', fontSize:'13px', margin:0 }}>لا توجد إشعارات</p>
+                      </div>
+                    ) : (
+                      notifs.map(n => {
+                        const meta = NOTIF_META[n.type] || { icon:'📌', color:'#374151', bg:'#f3f4f6' };
+                        return (
+                          <div key={n.id} style={{ padding:'12px 16px', borderBottom:'1px solid #f9fafb', display:'flex', gap:'10px', alignItems:'flex-start', background: n.read ? '#fff' : '#f0f9ff' }}>
+                            <div style={{ width:'36px', height:'36px', borderRadius:'10px', background:meta.bg, display:'flex', alignItems:'center', justifyContent:'center', fontSize:'16px', flexShrink:0 }}>
+                              {meta.icon}
+                            </div>
+                            <div style={{ flex:1, minWidth:0 }}>
+                              <div style={{ fontSize:'13px', fontWeight:'600', color:'#111827', marginBottom:'2px' }}>{n.title}</div>
+                              <div style={{ fontSize:'11px', color:'#6b7280', lineHeight:'1.4' }}>{n.body}</div>
+                              <div style={{ fontSize:'10px', color:'#9ca3af', marginTop:'4px', display:'flex', gap:'6px', alignItems:'center' }}>
+                                <span>{n.by}</span>
+                                <span>·</span>
+                                <span>{fmtTime(n.createdAt)}</span>
+                              </div>
+                            </div>
+                            {!n.read && (
+                              <div style={{ width:'8px', height:'8px', borderRadius:'50%', background:'#3b82f6', flexShrink:0, marginTop:'4px' }}/>
+                            )}
+                          </div>
+                        );
+                      })
+                    )}
+                  </div>
+                  {notifs.length > 0 && (
+                    <div style={{ padding:'10px 16px', borderTop:'1px solid #f3f4f6', textAlign:'center', background:'#f8fafc' }}>
+                      <button
+                        onClick={async () => { if(activeProp) { await markAllRead(activeProp.id); setNotifs(p => p.map(n => ({...n,read:true}))); }}}
+                        style={{ fontSize:'12px', color:'#1B4F72', background:'none', border:'none', cursor:'pointer', fontFamily:'sans-serif', fontWeight:'600' }}
+                      >
+                        تعليم الكل كمقروء ✓
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* زر الخروج */}
+            <button onClick={() => auth.signOut().then(() => router.push('/login'))}
+              style={{ background:'rgba(255,255,255,0.12)', border:'1px solid rgba(255,255,255,0.2)', color:'rgba(255,255,255,0.75)', fontSize:'11px', padding:'7px 14px', borderRadius:'12px', cursor:'pointer', fontFamily:'sans-serif' }}>
+              خروج
+            </button>
+          </div>
         </div>
+
+        {/* العقار المحدد */}
         {activeProp && (
           <div onClick={() => properties.length > 1 && setShowPropPicker(true)}
             style={{ background:'rgba(255,255,255,0.12)', border:'1px solid rgba(255,255,255,0.18)', borderRadius:'16px', padding:'11px 14px', display:'flex', alignItems:'center', gap:'10px', position:'relative', zIndex:1, cursor: properties.length > 1 ? 'pointer' : 'default' }}>
@@ -183,7 +305,7 @@ export default function HomePage() {
         </svg>
       </div>
 
-      {/* STATS */}
+      {/* ══ STATS ══ */}
       <div style={{ display:'grid', gridTemplateColumns:'repeat(3,1fr)', gap:'10px', padding:'0 16px', marginTop:'-36px', marginBottom:'24px', position:'relative', zIndex:10 }}>
         {[
           { label:'حجوزات', value:stats.bookings, color:'#D4AC0D', bg:'#FEF9E7', icon:<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#D4AC0D" strokeWidth="2"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg> },
@@ -198,7 +320,7 @@ export default function HomePage() {
         ))}
       </div>
 
-      {/* MENU */}
+      {/* ══ MENU ══ */}
       <div style={{ fontSize:'12px', fontWeight:'700', color:'#64748b', letterSpacing:'0.4px', padding:'0 16px', marginBottom:'12px' }}>القائمة الرئيسية</div>
       <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:'11px', padding:'0 16px', marginBottom:'22px' }}>
         {menu.map(item => {
@@ -206,12 +328,10 @@ export default function HomePage() {
           return (
             <a key={item.href} href={item.href}
               style={{ borderRadius:'22px', minHeight:'130px', position:'relative', overflow:'hidden', cursor:'pointer', boxShadow:'0 6px 20px rgba(0,0,0,0.12)', textDecoration:'none', display:'block', background:item.grad }}>
-              {/* أيقونة SVG ضخمة شفافة كخلفية */}
               <div style={{ position:'absolute', inset:0, display:'flex', alignItems:'center', justifyContent:'center', opacity:0.15, pointerEvents:'none' }}>
                 <svg viewBox="0 0 24 24" width="110" height="110" fill="none" stroke="white" strokeWidth="0.8"
                   dangerouslySetInnerHTML={{ __html: item.bgPath }}/>
               </div>
-              {/* النص والرقم */}
               <div style={{ position:'relative', zIndex:1, padding:'16px 14px', height:'100%', display:'flex', flexDirection:'column', justifyContent:'space-between' }}>
                 <div>
                   <div style={{ fontSize:'14px', fontWeight:'700', color:'#fff', marginBottom:'4px' }}>{item.label}</div>
@@ -228,7 +348,7 @@ export default function HomePage() {
         })}
       </div>
 
-      {/* OWNER SETTINGS */}
+      {/* ══ OWNER SETTINGS ══ */}
       {appUser?.role === 'owner' && (
         <div style={{ padding:'0 16px', marginBottom:'16px' }}>
           <div style={{ fontSize:'12px', fontWeight:'700', color:'#64748b', letterSpacing:'0.4px', marginBottom:'10px' }}>إعدادات المالك</div>
@@ -257,7 +377,7 @@ export default function HomePage() {
         </div>
       )}
 
-      {/* BOTTOM NAV */}
+      {/* ══ BOTTOM NAV ══ */}
       <div style={{ position:'fixed', bottom:0, left:0, right:0, height:'68px', background:'#fff', borderTop:'1px solid #e2e8f0', display:'flex', alignItems:'center', justifyContent:'space-around', paddingBottom:'10px', boxShadow:'0 -4px 20px rgba(0,0,0,0.06)', zIndex:50 }}>
         <div style={{ display:'flex', flexDirection:'column', alignItems:'center', gap:'3px', padding:'6px 16px', borderRadius:'14px', background:'#EBF5FB' }}>
           <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#1B4F72" strokeWidth="2"><path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z"/><polyline points="9,22 9,12 15,12 15,22"/></svg>
@@ -277,7 +397,7 @@ export default function HomePage() {
         </div>
       </div>
 
-      {/* PROPERTY PICKER */}
+      {/* ══ PROPERTY PICKER ══ */}
       {showPropPicker && (
         <div style={{ position:'fixed', inset:'0', background:'rgba(0,0,0,0.45)', display:'flex', alignItems:'flex-end', justifyContent:'center', zIndex:100 }}
           onClick={() => setShowPropPicker(false)}>
