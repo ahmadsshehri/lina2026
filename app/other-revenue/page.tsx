@@ -8,6 +8,7 @@ import {
 } from 'firebase/firestore';
 import { useRouter } from 'next/navigation';
 import { getCurrentUser, loadPropertiesForUser, AppUserBasic, PropertyBasic } from '../../lib/userHelpers';
+import { notify } from '../../lib/notifications';
 
 interface OtherRevenue {
   id: string; propertyId: string; amount: number;
@@ -43,6 +44,7 @@ export default function OtherRevenuePage() {
   const [appUser,    setAppUser]    = useState<AppUserBasic | null>(null);
   const [properties, setProperties] = useState<PropertyBasic[]>([]);
   const [propId,     setPropId]     = useState('');
+  const [propName,   setPropName]   = useState('');
   const [revenues,   setRevenues]   = useState<OtherRevenue[]>([]);
   const [loading,    setLoading]    = useState(true);
   const [showModal,  setShowModal]  = useState(false);
@@ -63,13 +65,14 @@ export default function OtherRevenuePage() {
       setAppUser(user);
       const props = await loadPropertiesForUser(fbUser.uid, user.role);
       setProperties(props);
-    if (props.length > 0) {
-  const savedId = localStorage.getItem('selectedPropertyId');
-  const saved = props.find(p => p.id === savedId);
-  const selected = saved || props[0];
-  setPropId(selected.id);
-  await loadData(selected.id);
-}
+      if (props.length > 0) {
+        const savedId = localStorage.getItem('selectedPropertyId');
+        const saved = props.find(p => p.id === savedId);
+        const selected = saved || props[0];
+        setPropId(selected.id);
+        setPropName(selected.name);
+        await loadData(selected.id);
+      }
       setLoading(false);
     });
     return unsub;
@@ -102,8 +105,33 @@ export default function OtherRevenuePage() {
         receivedBy: form.receivedBy, paymentMethod: form.paymentMethod,
         notes: form.notes.trim(),
       };
-      if (editItem) await updateDoc(doc(db,'otherRevenue',editItem.id), data);
-      else await addDoc(collection(db,'otherRevenue'), { ...data, createdAt:serverTimestamp() });
+      if (editItem) {
+        await updateDoc(doc(db,'otherRevenue',editItem.id), data);
+        // 🔔 إشعار تعديل إيراد
+        await notify({
+          type: 'revenue_edit',
+          propertyId: propId,
+          propertyName: propName,
+          title: 'تم تعديل إيراد آخر',
+          body: `${form.reason} — ${Number(form.amount).toLocaleString('ar-SA')} ر.س`,
+          by: appUser?.name || '—',
+          byRole: appUser?.role,
+          amount: Number(form.amount),
+        });
+      } else {
+        await addDoc(collection(db,'otherRevenue'), { ...data, createdAt:serverTimestamp() });
+        // 🔔 إشعار إضافة إيراد
+        await notify({
+          type: 'revenue_add',
+          propertyId: propId,
+          propertyName: propName,
+          title: 'إيراد آخر جديد',
+          body: `${form.reason} — ${Number(form.amount).toLocaleString('ar-SA')} ر.س`,
+          by: appUser?.name || '—',
+          byRole: appUser?.role,
+          amount: Number(form.amount),
+        });
+      }
       await loadData(propId);
       setShowModal(false); setEditItem(null); setForm(EMPTY_FORM);
     } catch (e) { alert('حدث خطأ'); }
@@ -115,13 +143,23 @@ export default function OtherRevenuePage() {
     setSaving(true);
     try {
       await deleteDoc(doc(db,'otherRevenue',deleteConfirm.id));
+      // 🔔 إشعار حذف إيراد
+      await notify({
+        type: 'revenue_delete',
+        propertyId: propId,
+        propertyName: propName,
+        title: 'تم حذف إيراد آخر',
+        body: `${deleteConfirm.reason} — ${deleteConfirm.amount.toLocaleString('ar-SA')} ر.س`,
+        by: appUser?.name || '—',
+        byRole: appUser?.role,
+        amount: deleteConfirm.amount,
+      });
       await loadData(propId);
       setDeleteConfirm(null);
     } catch (e) { alert('حدث خطأ'); }
     setSaving(false);
   };
 
-  // Month filter options
   const monthOptions = Array.from({ length:13 }, (_,i) => {
     if (i === 0) return { val:'all', label:'كل الأشهر' };
     const d = new Date(); d.setMonth(d.getMonth()-(i-1));
@@ -135,9 +173,9 @@ export default function OtherRevenuePage() {
     return d.getFullYear()===y && (d.getMonth()+1)===m;
   });
 
-  const total    = filtered.reduce((s,r) => s+r.amount, 0);
-  const byMgr    = filtered.filter(r => r.receivedBy!=='owner').reduce((s,r) => s+r.amount, 0);
-  const byOwner  = filtered.filter(r => r.receivedBy==='owner').reduce((s,r) => s+r.amount, 0);
+  const total   = filtered.reduce((s,r) => s+r.amount, 0);
+  const byMgr   = filtered.filter(r => r.receivedBy!=='owner').reduce((s,r) => s+r.amount, 0);
+  const byOwner = filtered.filter(r => r.receivedBy==='owner').reduce((s,r) => s+r.amount, 0);
 
   if (loading) return (
     <div style={{ display:'flex', justifyContent:'center', alignItems:'center', height:'100vh' }}>
@@ -156,17 +194,17 @@ export default function OtherRevenuePage() {
         </button>
         <div style={{ flex:1 }}>
           <h1 style={{ margin:0, fontSize:'17px', fontWeight:'600', color:'#fff' }}>الإيرادات الأخرى</h1>
-          <p style={{ margin:0, fontSize:'12px', color:'rgba(255,255,255,0.6)' }}>إيرادات خارج نطاق الإيجار والحجوزات</p>
+          <p style={{ margin:0, fontSize:'12px', color:'rgba(255,255,255,0.7)' }}>إيرادات خارج نطاق الإيجار والحجوزات</p>
         </div>
         <div style={{ display:'flex', gap:'8px', alignItems:'center' }}>
           {properties.length>1 && (
-            <select value={propId} onChange={e=>{setPropId(e.target.value);loadData(e.target.value);}}
+            <select value={propId} onChange={e=>{const p=properties.find(x=>x.id===e.target.value);setPropId(e.target.value);setPropName(p?.name||'');loadData(e.target.value);}}
               style={{ border:'none', borderRadius:'8px', padding:'6px 10px', fontSize:'12px', background:'rgba(255,255,255,0.15)', color:'#fff' }}>
               {properties.map(p=><option key={p.id} value={p.id} style={{ color:'#000' }}>{p.name}</option>)}
             </select>
           )}
           {canEdit && (
-            <button onClick={openAdd} style={{ background:'#D4AC0D', border:'none', borderRadius:'10px', padding:'10px 14px', cursor:'pointer', color:'#fff', fontSize:'13px', fontWeight:'600', fontFamily:'sans-serif' }}>
+            <button onClick={openAdd} style={{ background:'rgba(255,255,255,0.2)', border:'1px solid rgba(255,255,255,0.3)', borderRadius:'10px', padding:'10px 14px', cursor:'pointer', color:'#fff', fontSize:'13px', fontWeight:'600', fontFamily:'sans-serif' }}>
               + إيراد
             </button>
           )}
@@ -202,11 +240,7 @@ export default function OtherRevenuePage() {
           <div style={{ background:'#fff', borderRadius:'16px', padding:'40px', textAlign:'center', border:'1px solid #e5e7eb' }}>
             <div style={{ fontSize:'48px', marginBottom:'12px' }}>💵</div>
             <p style={{ color:'#6b7280', fontSize:'14px', margin:'0 0 16px' }}>لا توجد إيرادات أخرى</p>
-            {canEdit && (
-              <button onClick={openAdd} style={{ padding:'10px 20px', background:'#1B4F72', color:'#fff', border:'none', borderRadius:'10px', cursor:'pointer', fontSize:'14px', fontFamily:'sans-serif' }}>
-                + إضافة إيراد
-              </button>
-            )}
+            {canEdit && <button onClick={openAdd} style={{ padding:'10px 20px', background:'#1B4F72', color:'#fff', border:'none', borderRadius:'10px', cursor:'pointer', fontSize:'14px', fontFamily:'sans-serif' }}>+ إضافة إيراد</button>}
           </div>
         ) : (
           <div style={{ display:'flex', flexDirection:'column', gap:'10px' }}>
@@ -216,39 +250,29 @@ export default function OtherRevenuePage() {
                 : { label:'المسؤول', color:'#1e40af', bg:'#dbeafe', icon:'👤' };
               return (
                 <div key={r.id} style={{ background:'#fff', borderRadius:'14px', border:'1px solid #e5e7eb', padding:'14px 16px', display:'flex', alignItems:'center', gap:'12px' }}>
-                  <div style={{ width:'44px', height:'44px', borderRadius:'12px', background:'#d1fae5', display:'flex', alignItems:'center', justifyContent:'center', fontSize:'22px', flexShrink:0 }}>
-                    💵
-                  </div>
+                  <div style={{ width:'44px', height:'44px', borderRadius:'12px', background:'#d1fae5', display:'flex', alignItems:'center', justifyContent:'center', fontSize:'22px', flexShrink:0 }}>💵</div>
                   <div style={{ flex:1, minWidth:0 }}>
                     <div style={{ fontSize:'14px', fontWeight:'600', color:'#111827' }}>{r.reason}</div>
                     <div style={{ fontSize:'12px', color:'#9ca3af', marginTop:'2px' }}>
-                      {fmtDate(r.date)}
-                      {r.paymentMethod==='transfer'?' · تحويل بنكي':' · كاش'}
-                      {r.notes && ` · ${r.notes}`}
+                      {fmtDate(r.date)}{r.paymentMethod==='transfer'?' · تحويل بنكي':' · كاش'}{r.notes && ` · ${r.notes}`}
                     </div>
                     <span style={{ background:rcv.bg, color:rcv.color, fontSize:'11px', fontWeight:'600', padding:'2px 8px', borderRadius:'8px', marginTop:'4px', display:'inline-block' }}>
                       {rcv.icon} استلمه {rcv.label}
                     </span>
                   </div>
-                  <div style={{ fontSize:'17px', fontWeight:'700', color:'#16a34a', flexShrink:0 }}>
-                    {r.amount.toLocaleString('ar-SA')} ر.س
-                  </div>
+                  <div style={{ fontSize:'17px', fontWeight:'700', color:'#16a34a', flexShrink:0 }}>{r.amount.toLocaleString('ar-SA')} ر.س</div>
                   {canEdit && (
                     <div style={{ display:'flex', gap:'6px', flexShrink:0 }}>
                       <button onClick={() => openEdit(r)} style={{ padding:'5px 10px', border:'1px solid #d1d5db', borderRadius:'8px', background:'#fff', cursor:'pointer', fontSize:'12px', fontFamily:'sans-serif' }}>✏️</button>
-                      {canDelete && (
-                        <button onClick={() => setDeleteConfirm(r)} style={{ padding:'5px 10px', border:'1px solid #fca5a5', borderRadius:'8px', background:'#fff', cursor:'pointer', fontSize:'12px', color:'#dc2626', fontFamily:'sans-serif' }}>🗑️</button>
-                      )}
+                      {canDelete && <button onClick={() => setDeleteConfirm(r)} style={{ padding:'5px 10px', border:'1px solid #fca5a5', borderRadius:'8px', background:'#fff', cursor:'pointer', fontSize:'12px', color:'#dc2626', fontFamily:'sans-serif' }}>🗑️</button>}
                     </div>
                   )}
                 </div>
               );
             })}
-
-            {/* Footer total */}
-            <div style={{ background:'#1B4F72', borderRadius:'12px', padding:'14px 16px', display:'flex', justifyContent:'space-between', alignItems:'center' }}>
-              <span style={{ color:'rgba(255,255,255,0.7)', fontSize:'13px' }}>إجمالي الإيرادات الأخرى</span>
-              <span style={{ color:'#D4AC0D', fontSize:'18px', fontWeight:'700' }}>{total.toLocaleString('ar-SA')} ر.س</span>
+            <div style={{ background:'linear-gradient(135deg,#9A7D0A,#D4AC0D)', borderRadius:'12px', padding:'14px 16px', display:'flex', justifyContent:'space-between', alignItems:'center' }}>
+              <span style={{ color:'rgba(255,255,255,0.8)', fontSize:'13px' }}>إجمالي الإيرادات الأخرى</span>
+              <span style={{ color:'#fff', fontSize:'18px', fontWeight:'700' }}>{total.toLocaleString('ar-SA')} ر.س</span>
             </div>
           </div>
         )}
@@ -265,8 +289,6 @@ export default function OtherRevenuePage() {
               <button onClick={() => setShowModal(false)} style={{ border:'none', background:'#f3f4f6', borderRadius:'50%', width:'32px', height:'32px', cursor:'pointer', fontSize:'16px' }}>✕</button>
             </div>
             <div style={{ display:'flex', flexDirection:'column', gap:'14px' }}>
-
-              {/* السبب */}
               <div>
                 <label style={lbl}>سبب الإيراد <span style={{ color:'#dc2626' }}>*</span></label>
                 <div style={{ display:'flex', flexWrap:'wrap', gap:'6px', marginBottom:'8px' }}>
@@ -277,39 +299,17 @@ export default function OtherRevenuePage() {
                     </button>
                   ))}
                 </div>
-                <input value={form.reason} onChange={e=>setForm(f=>({...f,reason:e.target.value}))}
-                  placeholder="أو اكتب السبب مباشرة..." style={inp}/>
+                <input value={form.reason} onChange={e=>setForm(f=>({...f,reason:e.target.value}))} placeholder="أو اكتب السبب مباشرة..." style={inp}/>
               </div>
-
-              {/* المبلغ والتاريخ */}
               <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:'12px' }}>
-                <div>
-                  <label style={lbl}>المبلغ (ر.س) <span style={{ color:'#dc2626' }}>*</span></label>
-                  <input type="number" value={form.amount} onChange={e=>setForm(f=>({...f,amount:e.target.value}))} style={inp} placeholder="0"/>
-                </div>
-                <div>
-                  <label style={lbl}>التاريخ</label>
-                  <input type="date" value={form.date} onChange={e=>setForm(f=>({...f,date:e.target.value}))} style={inp}/>
-                </div>
+                <div><label style={lbl}>المبلغ (ر.س) <span style={{ color:'#dc2626' }}>*</span></label><input type="number" value={form.amount} onChange={e=>setForm(f=>({...f,amount:e.target.value}))} style={inp} placeholder="0"/></div>
+                <div><label style={lbl}>التاريخ</label><input type="date" value={form.date} onChange={e=>setForm(f=>({...f,date:e.target.value}))} style={inp}/></div>
               </div>
-
-              {/* طريقة الاستلام */}
-              <div>
-                <label style={lbl}>طريقة الاستلام</label>
-                <select value={form.paymentMethod} onChange={e=>setForm(f=>({...f,paymentMethod:e.target.value}))} style={inp}>
-                  <option value="transfer">تحويل بنكي</option>
-                  <option value="cash">كاش</option>
-                </select>
-              </div>
-
-              {/* مستلم المبلغ */}
+              <div><label style={lbl}>طريقة الاستلام</label><select value={form.paymentMethod} onChange={e=>setForm(f=>({...f,paymentMethod:e.target.value}))} style={inp}><option value="transfer">تحويل بنكي</option><option value="cash">كاش</option></select></div>
               <div>
                 <label style={{ ...lbl, fontWeight:'600' }}>💰 من استلم المبلغ؟</label>
                 <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:'8px' }}>
-                  {[
-                    { val:'manager', label:'مسؤول العقار', icon:'👤', color:'#1e40af', bg:'#dbeafe' },
-                    { val:'owner',   label:'المالك',        icon:'👑', color:'#7c3aed', bg:'#ede9fe' },
-                  ].map(opt=>(
+                  {[{val:'manager',label:'مسؤول العقار',icon:'👤',color:'#1e40af',bg:'#dbeafe'},{val:'owner',label:'المالك',icon:'👑',color:'#7c3aed',bg:'#ede9fe'}].map(opt=>(
                     <button key={opt.val} onClick={() => setForm(f=>({...f,receivedBy:opt.val}))}
                       style={{ padding:'12px 8px', border:`2px solid ${form.receivedBy===opt.val?opt.color:'#e5e7eb'}`, borderRadius:'12px', background:form.receivedBy===opt.val?opt.bg:'#fff', cursor:'pointer', textAlign:'center', fontFamily:'sans-serif' }}>
                       <div style={{ fontSize:'22px', marginBottom:'4px' }}>{opt.icon}</div>
@@ -318,14 +318,8 @@ export default function OtherRevenuePage() {
                   ))}
                 </div>
               </div>
-
-              {/* ملاحظات */}
-              <div>
-                <label style={lbl}>ملاحظات</label>
-                <input value={form.notes} onChange={e=>setForm(f=>({...f,notes:e.target.value}))} style={inp} placeholder="اختياري"/>
-              </div>
+              <div><label style={lbl}>ملاحظات</label><input value={form.notes} onChange={e=>setForm(f=>({...f,notes:e.target.value}))} style={inp} placeholder="اختياري"/></div>
             </div>
-
             <div style={{ display:'flex', gap:'10px', marginTop:'24px' }}>
               <button onClick={save} disabled={saving}
                 style={{ flex:1, padding:'13px', background:saving?'#9ca3af':'#1B4F72', color:'#fff', border:'none', borderRadius:'12px', cursor:saving?'not-allowed':'pointer', fontSize:'15px', fontWeight:'600', fontFamily:'sans-serif' }}>
