@@ -8,6 +8,7 @@ import {
 } from 'firebase/firestore';
 import { useRouter } from 'next/navigation';
 import { getCurrentUser, loadPropertiesForUser, AppUserBasic, PropertyBasic } from '../../lib/userHelpers';
+import { notify } from '../../lib/notifications';
 
 interface Expense {
   id: string; category: string; subcategory: string;
@@ -45,6 +46,7 @@ export default function ExpensesPage() {
   const [appUser,    setAppUser]    = useState<AppUserBasic | null>(null);
   const [properties, setProperties] = useState<PropertyBasic[]>([]);
   const [propId,     setPropId]     = useState('');
+  const [propName,   setPropName]   = useState('');
   const [expenses,   setExpenses]   = useState<Expense[]>([]);
   const [loading,    setLoading]    = useState(true);
   const [showModal,  setShowModal]  = useState(false);
@@ -54,7 +56,6 @@ export default function ExpensesPage() {
   const [deleteTarget,  setDeleteTarget]  = useState<Expense | null>(null);
   const [deleteReason,  setDeleteReason]  = useState('');
 
-  // ── فلتر الشهر/السنة ────────────────────────────────────────────────────
   const [viewMode,      setViewMode]      = useState<'month'|'year'>('month');
   const [selectedMonth, setSelectedMonth] = useState(currentMonthStr());
   const [selectedYear,  setSelectedYear]  = useState(String(new Date().getFullYear()));
@@ -66,7 +67,6 @@ export default function ExpensesPage() {
 
   const canDelete = appUser?.role === 'owner';
 
-  // Month options
   const monthOptions = Array.from({ length:24 }, (_,i) => {
     const d = new Date(); d.setMonth(d.getMonth()-i);
     return { val:`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`, label:`${MONTHS_AR[d.getMonth()]} ${d.getFullYear()}` };
@@ -81,13 +81,14 @@ export default function ExpensesPage() {
       setAppUser(user);
       const props = await loadPropertiesForUser(fbUser.uid, user.role);
       setProperties(props);
-    if (props.length > 0) {
-  const savedId = localStorage.getItem('selectedPropertyId');
-  const saved = props.find(p => p.id === savedId);
-  const selected = saved || props[0];
-  setPropId(selected.id);
-  await loadExpenses(selected.id);
-}
+      if (props.length > 0) {
+        const savedId = localStorage.getItem('selectedPropertyId');
+        const saved = props.find(p => p.id === savedId);
+        const selected = saved || props[0];
+        setPropId(selected.id);
+        setPropName(selected.name);
+        await loadExpenses(selected.id);
+      }
       setLoading(false);
     });
     return unsub;
@@ -101,7 +102,6 @@ export default function ExpensesPage() {
     );
   };
 
-  // ── فلترة بالشهر أو السنة ───────────────────────────────────────────────
   const filteredByPeriod = useMemo(() => {
     return expenses.filter(e => {
       const d = e.date?.toDate ? e.date.toDate() : null;
@@ -115,14 +115,12 @@ export default function ExpensesPage() {
     });
   }, [expenses, viewMode, selectedMonth, selectedYear]);
 
-  // ── فلترة بالفئة والجهة ──────────────────────────────────────────────────
   const filtered = useMemo(() => filteredByPeriod.filter(e => {
     if (catFilter !== 'all' && e.category !== catFilter) return false;
     if (paidByFilter !== 'all' && e.paidBy !== paidByFilter) return false;
     return true;
   }), [filteredByPeriod, catFilter, paidByFilter]);
 
-  // ── إحصائيات الفترة (على الكل بدون فلتر الفئة) ──────────────────────────
   const periodStats = useMemo(() => {
     const total   = filteredByPeriod.reduce((s,e) => s+e.amount, 0);
     const byMgr   = filteredByPeriod.filter(e=>e.paidBy!=='owner').reduce((s,e)=>s+e.amount, 0);
@@ -133,11 +131,9 @@ export default function ExpensesPage() {
     return { total, byMgr, byOwner, byCat };
   }, [filteredByPeriod]);
 
-  // ── إحصائيات الجدول المفلتر ─────────────────────────────────────────────
   const filteredTotal = filtered.reduce((s,e) => s+e.amount, 0);
   const pendingDeletes = filteredByPeriod.filter(e=>e.deleteRequested).length;
 
-  // ── في وضع السنة: تجميع حسب الشهر ──────────────────────────────────────
   const monthlyBreakdown = useMemo(() => {
     if (viewMode !== 'year') return null;
     const y = Number(selectedYear);
@@ -163,6 +159,17 @@ export default function ExpensesPage() {
         recordedBy: auth.currentUser?.uid,
         createdAt: serverTimestamp(),
       });
+      // 🔔 إشعار إضافة مصروف
+      await notify({
+        type: 'expense_add',
+        propertyId: propId,
+        propertyName: propName,
+        title: 'مصروف جديد',
+        body: `${CAT[form.category]||form.category} — ${form.subcategory} — ${Number(form.amount).toLocaleString('ar-SA')} ر.س`,
+        by: appUser?.name || '—',
+        byRole: appUser?.role,
+        amount: Number(form.amount),
+      });
       await loadExpenses(propId);
       setShowModal(false);
       setForm({ category:'electricity', subcategory:'', amount:'', date:'', paidBy:'manager', paymentMethod:'transfer', notes:'' });
@@ -170,9 +177,20 @@ export default function ExpensesPage() {
     setSaving(false);
   };
 
-  const handleDeleteOwner = async (id: string) => {
+  const handleDeleteOwner = async (expense: Expense) => {
     if (!confirm('هل أنت متأكد من الحذف؟')) return;
-    await deleteDoc(doc(db,'expenses',id));
+    await deleteDoc(doc(db,'expenses', expense.id));
+    // 🔔 إشعار حذف مصروف
+    await notify({
+      type: 'expense_delete',
+      propertyId: propId,
+      propertyName: propName,
+      title: 'تم حذف مصروف',
+      body: `${CAT[expense.category]||expense.category} — ${expense.subcategory} — ${expense.amount.toLocaleString('ar-SA')} ر.س`,
+      by: appUser?.name || '—',
+      byRole: appUser?.role,
+      amount: expense.amount,
+    });
     await loadExpenses(propId);
   };
 
@@ -223,13 +241,13 @@ export default function ExpensesPage() {
         </div>
         <div style={{ display:'flex', gap:'8px', alignItems:'center' }}>
           {properties.length>1 && (
-            <select value={propId} onChange={e=>{setPropId(e.target.value);loadExpenses(e.target.value);}}
+            <select value={propId} onChange={e=>{const p=properties.find(x=>x.id===e.target.value);setPropId(e.target.value);setPropName(p?.name||'');loadExpenses(e.target.value);}}
               style={{ border:'none', borderRadius:'8px', padding:'6px 10px', fontSize:'12px', background:'rgba(255,255,255,0.15)', color:'#fff' }}>
               {properties.map(p=><option key={p.id} value={p.id} style={{ color:'#000' }}>{p.name}</option>)}
             </select>
           )}
           <button onClick={() => setShowModal(true)}
-            style={{ background:'#D4AC0D', border:'none', borderRadius:'10px', padding:'10px 14px', cursor:'pointer', color:'#fff', fontSize:'13px', fontWeight:'600', fontFamily:'sans-serif' }}>
+            style={{ background:'rgba(255,255,255,0.2)', border:'1px solid rgba(255,255,255,0.3)', borderRadius:'10px', padding:'10px 14px', cursor:'pointer', color:'#fff', fontSize:'13px', fontWeight:'600', fontFamily:'sans-serif' }}>
             + مصروف
           </button>
         </div>
@@ -237,9 +255,8 @@ export default function ExpensesPage() {
 
       <div style={{ padding:'16px', maxWidth:'900px', margin:'0 auto' }}>
 
-        {/* ══ Period Filter ══ */}
+        {/* Period Filter */}
         <div style={{ background:'#fff', borderRadius:'16px', border:'1px solid #e5e7eb', padding:'16px', marginBottom:'16px' }}>
-          {/* Mode Switch */}
           <div style={{ display:'flex', gap:'4px', background:'#f3f4f6', borderRadius:'10px', padding:'4px', marginBottom:'12px', width:'fit-content' }}>
             {(['month','year'] as const).map(m=>(
               <button key={m} onClick={()=>setViewMode(m)}
@@ -248,9 +265,7 @@ export default function ExpensesPage() {
               </button>
             ))}
           </div>
-
-          {/* Selectors */}
-          <div style={{ display:'grid', gridTemplateColumns:viewMode==='month'?'1fr':'1fr', gap:'10px' }}>
+          <div style={{ display:'grid', gridTemplateColumns:'1fr', gap:'10px' }}>
             {viewMode==='month' ? (
               <select value={selectedMonth} onChange={e=>setSelectedMonth(e.target.value)}
                 style={{ border:'1.5px solid #e5e7eb', borderRadius:'12px', padding:'11px 14px', fontSize:'14px', background:'#fff', fontFamily:'sans-serif' }}>
@@ -263,8 +278,6 @@ export default function ExpensesPage() {
               </select>
             )}
           </div>
-
-          {/* Sub-filters */}
           <div style={{ display:'flex', gap:'8px', marginTop:'10px', flexWrap:'wrap' }}>
             <select value={catFilter} onChange={e=>setCatFilter(e.target.value)}
               style={{ border:'1px solid #e5e7eb', borderRadius:'8px', padding:'7px 12px', fontSize:'12px', background:'#fff', fontFamily:'sans-serif' }}>
@@ -293,7 +306,7 @@ export default function ExpensesPage() {
           </div>
         )}
 
-        {/* ══ KPIs ══ */}
+        {/* KPIs */}
         <div style={{ display:'grid', gridTemplateColumns:'repeat(4,1fr)', gap:'10px', marginBottom:'16px' }}>
           {[
             { label:`إجمالي ${periodLabel}`, val:periodStats.total.toLocaleString('ar-SA')+' ر.س', color:'#dc2626', bg:'#fee2e2' },
@@ -308,7 +321,7 @@ export default function ExpensesPage() {
           ))}
         </div>
 
-        {/* ── في وضع السنة: جدول الأشهر ── */}
+        {/* في وضع السنة */}
         {viewMode==='year' && monthlyBreakdown && monthlyBreakdown.length>0 && (
           <div style={{ background:'#fff', borderRadius:'12px', border:'1px solid #e5e7eb', padding:'16px', marginBottom:'16px' }}>
             <div style={{ fontSize:'13px', fontWeight:'600', color:'#374151', marginBottom:'12px' }}>توزيع المصاريف على أشهر {selectedYear}</div>
@@ -338,7 +351,7 @@ export default function ExpensesPage() {
                     <span style={{ color:'#374151', fontWeight:'500' }}>{(amt as number).toLocaleString('ar-SA')} ر.س ({pct}%)</span>
                   </div>
                   <div style={{ height:'6px', background:'#f3f4f6', borderRadius:'3px', overflow:'hidden' }}>
-                    <div style={{ height:'100%', background:'#1B4F72', width:`${pct}%`, borderRadius:'3px' }}/>
+                    <div style={{ height:'100%', background:'#C0392B', width:`${pct}%`, borderRadius:'3px' }}/>
                   </div>
                 </div>
               );
@@ -346,7 +359,7 @@ export default function ExpensesPage() {
           </div>
         )}
 
-        {/* ══ Expenses Table ══ */}
+        {/* Expenses Table */}
         {filtered.length===0 ? (
           <div style={{ background:'#fff', borderRadius:'16px', padding:'40px', textAlign:'center', border:'1px solid #e5e7eb' }}>
             <div style={{ fontSize:'48px', marginBottom:'12px' }}>💳</div>
@@ -387,14 +400,14 @@ export default function ExpensesPage() {
                           <div style={{ display:'flex', alignItems:'center', gap:'6px' }}>
                             <span style={{ fontSize:'11px', color:'#d97706', background:'#fef3c7', padding:'2px 8px', borderRadius:'6px' }}>🔴 طلب حذف</span>
                             {canDelete && (
-                              <button onClick={() => handleDeleteOwner(e.id)}
+                              <button onClick={() => handleDeleteOwner(e)}
                                 style={{ padding:'3px 8px', border:'1px solid #fca5a5', borderRadius:'6px', background:'#fff', cursor:'pointer', fontSize:'11px', color:'#dc2626', fontFamily:'sans-serif' }}>
                                 تأكيد
                               </button>
                             )}
                           </div>
                         ) : canDelete ? (
-                          <button onClick={() => handleDeleteOwner(e.id)}
+                          <button onClick={() => handleDeleteOwner(e)}
                             style={{ padding:'3px 8px', border:'1px solid #fca5a5', borderRadius:'6px', background:'#fff', cursor:'pointer', fontSize:'11px', color:'#dc2626', fontFamily:'sans-serif' }}>
                             حذف
                           </button>
@@ -412,9 +425,7 @@ export default function ExpensesPage() {
               {filtered.length>0 && (
                 <tfoot>
                   <tr style={{ background:'#f9fafb', borderTop:'2px solid #e5e7eb' }}>
-                    <td colSpan={3} style={{ padding:'10px 12px', fontWeight:'600', color:'#374151' }}>
-                      الإجمالي {catFilter!=='all'||paidByFilter!=='all'?'(مفلتر)':''}
-                    </td>
+                    <td colSpan={3} style={{ padding:'10px 12px', fontWeight:'600', color:'#374151' }}>الإجمالي {catFilter!=='all'||paidByFilter!=='all'?'(مفلتر)':''}</td>
                     <td style={{ padding:'10px 12px', fontWeight:'700', color:'#dc2626' }}>{filteredTotal.toLocaleString('ar-SA')} ر.س</td>
                     <td colSpan={3}/>
                   </tr>
@@ -436,42 +447,13 @@ export default function ExpensesPage() {
               <button onClick={() => setShowModal(false)} style={{ border:'none', background:'none', fontSize:'20px', cursor:'pointer', color:'#6b7280' }}>✕</button>
             </div>
             <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:'12px' }}>
-              <div>
-                <label style={lbl}>الفئة</label>
-                <select value={form.category} onChange={e=>setForm(f=>({...f,category:e.target.value}))} style={inp}>
-                  {Object.entries(CAT).map(([k,v])=><option key={k} value={k}>{v}</option>)}
-                </select>
-              </div>
-              <div>
-                <label style={lbl}>التاريخ</label>
-                <input type="date" value={form.date} onChange={e=>setForm(f=>({...f,date:e.target.value}))} style={inp}/>
-              </div>
-              <div style={{ gridColumn:'1 / -1' }}>
-                <label style={lbl}>البيان</label>
-                <input value={form.subcategory} placeholder="مثال: فاتورة كهرباء مارس" onChange={e=>setForm(f=>({...f,subcategory:e.target.value}))} style={inp}/>
-              </div>
-              <div>
-                <label style={lbl}>المبلغ (ر.س)</label>
-                <input type="number" value={form.amount} onChange={e=>setForm(f=>({...f,amount:e.target.value}))} style={inp}/>
-              </div>
-              <div>
-                <label style={lbl}>دُفع بواسطة</label>
-                <select value={form.paidBy} onChange={e=>setForm(f=>({...f,paidBy:e.target.value}))} style={inp}>
-                  <option value="manager">مسؤول العقار</option>
-                  <option value="owner">المالك</option>
-                </select>
-              </div>
-              <div>
-                <label style={lbl}>طريقة الدفع</label>
-                <select value={form.paymentMethod} onChange={e=>setForm(f=>({...f,paymentMethod:e.target.value}))} style={inp}>
-                  <option value="transfer">تحويل بنكي</option>
-                  <option value="cash">كاش</option>
-                </select>
-              </div>
-              <div>
-                <label style={lbl}>ملاحظات</label>
-                <input value={form.notes} onChange={e=>setForm(f=>({...f,notes:e.target.value}))} style={inp}/>
-              </div>
+              <div><label style={lbl}>الفئة</label><select value={form.category} onChange={e=>setForm(f=>({...f,category:e.target.value}))} style={inp}>{Object.entries(CAT).map(([k,v])=><option key={k} value={k}>{v}</option>)}</select></div>
+              <div><label style={lbl}>التاريخ</label><input type="date" value={form.date} onChange={e=>setForm(f=>({...f,date:e.target.value}))} style={inp}/></div>
+              <div style={{ gridColumn:'1 / -1' }}><label style={lbl}>البيان</label><input value={form.subcategory} placeholder="مثال: فاتورة كهرباء مارس" onChange={e=>setForm(f=>({...f,subcategory:e.target.value}))} style={inp}/></div>
+              <div><label style={lbl}>المبلغ (ر.س)</label><input type="number" value={form.amount} onChange={e=>setForm(f=>({...f,amount:e.target.value}))} style={inp}/></div>
+              <div><label style={lbl}>دُفع بواسطة</label><select value={form.paidBy} onChange={e=>setForm(f=>({...f,paidBy:e.target.value}))} style={inp}><option value="manager">مسؤول العقار</option><option value="owner">المالك</option></select></div>
+              <div><label style={lbl}>طريقة الدفع</label><select value={form.paymentMethod} onChange={e=>setForm(f=>({...f,paymentMethod:e.target.value}))} style={inp}><option value="transfer">تحويل بنكي</option><option value="cash">كاش</option></select></div>
+              <div><label style={lbl}>ملاحظات</label><input value={form.notes} onChange={e=>setForm(f=>({...f,notes:e.target.value}))} style={inp}/></div>
             </div>
             <div style={{ display:'flex', gap:'8px', marginTop:'20px' }}>
               <button onClick={saveExpense} disabled={saving}
