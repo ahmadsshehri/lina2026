@@ -8,6 +8,7 @@ import {
 } from 'firebase/firestore';
 import { useRouter } from 'next/navigation';
 import { getCurrentUser, loadPropertiesForUser, AppUserBasic, PropertyBasic } from '../../lib/userHelpers';
+import { notify } from '../../lib/notifications';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 interface Unit {
@@ -121,18 +122,17 @@ export default function MonthlyPage() {
   const [appUser,    setAppUser]    = useState<AppUserBasic | null>(null);
   const [properties, setProperties] = useState<PropertyBasic[]>([]);
   const [propId,     setPropId]     = useState('');
+  const [propName,   setPropName]   = useState('');
   const [units,      setUnits]      = useState<Unit[]>([]);
   const [tenants,    setTenants]    = useState<Tenant[]>([]);
   const [payments,   setPayments]   = useState<Payment[]>([]);
   const [loading,    setLoading]    = useState(true);
   const [tab,        setTab]        = useState<'active'|'schedule'|'expiring'|'former'|'archive'>('active');
 
-  // ─── Search & Filter state ───────────────────────────────────────────────
   const [searchQuery,    setSearchQuery]    = useState('');
   const [filterStatus,   setFilterStatus]   = useState<'all'|'paid'|'partial'|'late'|'upcoming'>('all');
   const [filterType,     setFilterType]     = useState<'all'|'monthly'|'furnished'|'owner'>('all');
 
-  // Modals
   const [showTenant, setShowTenant] = useState(false);
   const [showPay,    setShowPay]    = useState<{ tenant: Tenant; period?: any } | null>(null);
   const [editTenant, setEditTenant] = useState<Tenant | null>(null);
@@ -152,7 +152,6 @@ export default function MonthlyPage() {
     receivedBy: 'manager', periodMonth: 0, periodYear: 0,
   });
 
-  // ─── Auth & Load ─────────────────────────────────────────────────────────
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, async (fbUser) => {
       if (!fbUser) { router.push('/login'); return; }
@@ -162,13 +161,14 @@ export default function MonthlyPage() {
       setPf(f => ({ ...f, receivedBy: user.role === 'owner' ? 'owner' : 'manager' }));
       const props = await loadPropertiesForUser(fbUser.uid, user.role);
       setProperties(props);
-    if (props.length > 0) {
-  const savedId = localStorage.getItem('selectedPropertyId');
-  const saved = props.find(p => p.id === savedId);
-  const selected = saved || props[0];
-  setPropId(selected.id);
-  await loadData(selected.id);
-}
+      if (props.length > 0) {
+        const savedId = localStorage.getItem('selectedPropertyId');
+        const saved = props.find(p => p.id === savedId);
+        const selected = saved || props[0];
+        setPropId(selected.id);
+        setPropName(selected.name);
+        await loadData(selected.id);
+      }
       setLoading(false);
     });
     return unsub;
@@ -176,57 +176,46 @@ export default function MonthlyPage() {
 
   const loadData = async (pid: string) => {
     const [uSnap, ts, ps] = await Promise.all([
-      getDocs(query(collection(db,'units'),       where('propertyId','==',pid))),
-      getDocs(query(collection(db,'tenants'),     where('propertyId','==',pid))),
-      getDocs(query(collection(db,'rentPayments'),where('propertyId','==',pid))),
+      getDocs(query(collection(db,'units'),        where('propertyId','==',pid))),
+      getDocs(query(collection(db,'tenants'),      where('propertyId','==',pid))),
+      getDocs(query(collection(db,'rentPayments'), where('propertyId','==',pid))),
     ]);
     setUnits(uSnap.docs.map(d => ({ id:d.id, ...d.data() } as Unit)));
     setTenants(ts.docs.map(d => ({ id:d.id, ...d.data() } as Tenant)));
     setPayments(ps.docs.map(d => ({ id:d.id, ...d.data() } as Payment)));
   };
 
-  // ─── Derived data ─────────────────────────────────────────────────────────
-  const activeTenants  = tenants.filter(t => t.status === 'active');
-  const formerTenants  = tenants.filter(t => t.status !== 'active');
-  const expiringTenants= activeTenants.filter(t => { const d = daysUntil(t.contractEnd); return d >= 0 && d <= 30; });
-  const expiredTenants = activeTenants.filter(t => daysUntil(t.contractEnd) < 0);
-  const availableUnits = units.filter(u => u.type !== 'furnished' && (u.status === 'vacant' || (editTenant && u.id === editTenant.unitId)));
+  const activeTenants   = tenants.filter(t => t.status === 'active');
+  const formerTenants   = tenants.filter(t => t.status !== 'active');
+  const expiringTenants = activeTenants.filter(t => { const d = daysUntil(t.contractEnd); return d >= 0 && d <= 30; });
+  const expiredTenants  = activeTenants.filter(t => daysUntil(t.contractEnd) < 0);
+  const availableUnits  = units.filter(u => u.type !== 'furnished' && (u.status === 'vacant' || (editTenant && u.id === editTenant.unitId)));
 
-  // ─── SEARCH & FILTER LOGIC ────────────────────────────────────────────────
   const filteredActiveTenants = useMemo(() => {
     return activeTenants.filter(t => {
-      // Search by unit number or tenant name
       const q = searchQuery.trim().toLowerCase();
       if (q) {
         const matchUnit = t.unitNumber?.toLowerCase().includes(q);
         const matchName = t.name?.toLowerCase().includes(q);
         if (!matchUnit && !matchName) return false;
       }
-
-      // Filter by unit type
       if (filterType !== 'all') {
         const unit = units.find(u => u.id === t.unitId);
         if (!unit || unit.type !== filterType) return false;
       }
-
-      // Filter by payment status
       if (filterStatus !== 'all') {
         const tp       = payments.filter(p => p.tenantId === t.id);
         const schedule = buildPaymentSchedule(t, tp);
-        const current  = schedule.find(s => s.status === 'current' || s.status === 'late' || s.status === 'partial');
         const hasArrears = schedule.some(s => s.balance > 0 && s.status !== 'upcoming');
-
         if (filterStatus === 'paid'    && (hasArrears || !schedule.length)) return false;
         if (filterStatus === 'late'    && !schedule.some(s => s.status === 'late'))    return false;
         if (filterStatus === 'partial' && !schedule.some(s => s.status === 'partial')) return false;
         if (filterStatus === 'upcoming'&& schedule.some(s => s.status === 'late' || s.status === 'partial')) return false;
       }
-
       return true;
     });
   }, [activeTenants, searchQuery, filterStatus, filterType, payments, units]);
 
-  // ─── Handlers ─────────────────────────────────────────────────────────────
   const openAdd = () => { setEditTenant(null); setTf(EMPTY_TF); setShowTenant(true); };
 
   const openEdit = (t: Tenant) => {
@@ -278,9 +267,34 @@ export default function MonthlyPage() {
         } else if (tf.status === 'active') {
           await updateDoc(doc(db,'units',tf.unitId), { status:'occupied' });
         }
+        // 🔔 إشعار تعديل مستأجر
+        await notify({
+          type: 'tenant_edit',
+          propertyId: propId,
+          propertyName: propName,
+          title: 'تم تعديل بيانات مستأجر',
+          body: `تم تعديل بيانات ${tf.name} في شقة ${selectedUnit?.unitNumber||''}`,
+          by: appUser?.name || '—',
+          byRole: appUser?.role,
+          unitNumber: selectedUnit?.unitNumber,
+          guestOrTenant: tf.name,
+        });
       } else {
         await addDoc(collection(db,'tenants'), { ...data, createdAt: serverTimestamp() });
         await updateDoc(doc(db,'units',tf.unitId), { status:'occupied' });
+        // 🔔 إشعار إضافة مستأجر
+        await notify({
+          type: 'tenant_add',
+          propertyId: propId,
+          propertyName: propName,
+          title: 'مستأجر جديد',
+          body: `تم إضافة ${tf.name} في شقة ${selectedUnit?.unitNumber||''} — إيجار ${Number(tf.rentAmount).toLocaleString('ar-SA')} ر.س`,
+          by: appUser?.name || '—',
+          byRole: appUser?.role,
+          unitNumber: selectedUnit?.unitNumber,
+          guestOrTenant: tf.name,
+          amount: Number(tf.rentAmount),
+        });
       }
       await loadData(propId);
       setShowTenant(false);
@@ -294,6 +308,18 @@ export default function MonthlyPage() {
     try {
       await deleteDoc(doc(db,'tenants',t.id));
       if (t.unitId) await updateDoc(doc(db,'units',t.unitId), { status:'vacant' });
+      // 🔔 إشعار حذف مستأجر
+      await notify({
+        type: 'tenant_delete',
+        propertyId: propId,
+        propertyName: propName,
+        title: 'تم حذف مستأجر',
+        body: `تم حذف ${t.name} من شقة ${t.unitNumber}`,
+        by: appUser?.name || '—',
+        byRole: appUser?.role,
+        unitNumber: t.unitNumber,
+        guestOrTenant: t.name,
+      });
       await loadData(propId);
       setDeleteTenantConfirm(null);
     } catch (e: any) { alert('حدث خطأ: '+e.message); }
@@ -311,6 +337,18 @@ export default function MonthlyPage() {
         contractStart: Timestamp.fromDate(newStart),
         contractEnd:   Timestamp.fromDate(newEnd),
         status: 'active', renewedAt: serverTimestamp(),
+      });
+      // 🔔 إشعار تجديد عقد
+      await notify({
+        type: 'tenant_edit',
+        propertyId: propId,
+        propertyName: propName,
+        title: 'تجديد عقد إيجار',
+        body: `تم تجديد عقد ${t.name} شقة ${t.unitNumber} لسنة إضافية`,
+        by: appUser?.name || '—',
+        byRole: appUser?.role,
+        unitNumber: t.unitNumber,
+        guestOrTenant: t.name,
       });
       await loadData(propId);
       setRenewConfirm(null);
@@ -353,6 +391,19 @@ export default function MonthlyPage() {
           remaining -= pay;
         }
       }
+      // 🔔 إشعار تسجيل دفعة
+      await notify({
+        type: 'payment_add',
+        propertyId: propId,
+        propertyName: propName,
+        title: isPartial ? 'دفعة جزئية مسجّلة' : 'دفعة إيجار مسجّلة',
+        body: `تم تسجيل دفعة ${amountPaid.toLocaleString('ar-SA')} ر.س من ${tenant.name} شقة ${tenant.unitNumber}`,
+        by: appUser?.name || '—',
+        byRole: appUser?.role,
+        unitNumber: tenant.unitNumber,
+        guestOrTenant: tenant.name,
+        amount: amountPaid,
+      });
       await loadData(propId);
       setShowPay(null); setPartialPay(null);
       setPf(f => ({ ...f, amountPaid:'', referenceNumber:'' }));
@@ -360,7 +411,6 @@ export default function MonthlyPage() {
     setSaving(false);
   };
 
-  // ─── Loading ──────────────────────────────────────────────────────────────
   if (loading) return (
     <div style={{ display:'flex', justifyContent:'center', alignItems:'center', height:'100vh' }}>
       <div style={{ width:'40px', height:'40px', border:'3px solid #1B4F72', borderTopColor:'transparent', borderRadius:'50%', animation:'spin 0.8s linear infinite' }} />
@@ -368,137 +418,101 @@ export default function MonthlyPage() {
     </div>
   );
 
-  // ─── Render ───────────────────────────────────────────────────────────────
   return (
     <div dir="rtl" style={{ fontFamily:'sans-serif', background:'#f9fafb', minHeight:'100vh' }}>
 
-    {/* ══ Top Bar ══ */}
-<div style={{ background:'linear-gradient(135deg,#1B4F72 0%,#2980B9 100%)', padding:'16px 20px', display:'flex', alignItems:'center', gap:'12px', position:'sticky', top:0, zIndex:50, boxShadow:'0 2px 12px rgba(27,79,114,0.3)' }}>
-  <button onClick={() => router.push('/')} style={{ background:'rgba(255,255,255,0.15)', border:'1px solid rgba(255,255,255,0.2)', borderRadius:'10px', padding:'8px 12px', cursor:'pointer' }}>
-    <span style={{ color:'#fff', fontSize:'18px' }}>←</span>
-  </button>
-  <div style={{ flex:1 }}>
-    <h1 style={{ margin:0, fontSize:'17px', fontWeight:'700', color:'#fff' }}>الإيجار الشهري</h1>
-    <p style={{ margin:0, fontSize:'12px', color:'rgba(255,255,255,0.6)' }}>
-      {activeTenants.length} مستأجر نشط
-      {expiringTenants.length > 0 && ` · ⚠️ ${expiringTenants.length} عقد يقترب`}
-    </p>
-  </div>
-  <div style={{ display:'flex', gap:'8px', alignItems:'center' }}>
-    {properties.length > 1 && (
-      <select value={propId} onChange={e => { setPropId(e.target.value); loadData(e.target.value); }}
-        style={{ border:'none', borderRadius:'10px', padding:'7px 12px', fontSize:'12px', background:'rgba(255,255,255,0.15)', color:'#fff', cursor:'pointer' }}>
-        {properties.map(p => <option key={p.id} value={p.id} style={{ color:'#000' }}>{p.name}</option>)}
-      </select>
-    )}
-    {canEdit && (
-      <button onClick={openAdd}
-        style={{ background:'#D4AC0D', border:'none', borderRadius:'10px', padding:'10px 16px', cursor:'pointer', color:'#fff', fontSize:'13px', fontWeight:'700', boxShadow:'0 2px 8px rgba(212,172,13,0.4)', fontFamily:'sans-serif' }}>
-        + مستأجر
-      </button>
-    )}
-  </div>
-</div>
+      {/* ══ Top Bar ══ */}
+      <div style={{ background:'linear-gradient(135deg,#1A5276 0%,#2471A3 100%)', padding:'16px 20px', display:'flex', alignItems:'center', gap:'12px', position:'sticky', top:0, zIndex:50, boxShadow:'0 2px 12px rgba(26,82,118,0.3)' }}>
+        <button onClick={() => router.push('/')} style={{ background:'rgba(255,255,255,0.15)', border:'none', borderRadius:'8px', padding:'8px 12px', cursor:'pointer' }}>
+          <span style={{ color:'#fff', fontSize:'18px' }}>←</span>
+        </button>
+        <div style={{ flex:1 }}>
+          <h1 style={{ margin:0, fontSize:'17px', fontWeight:'600', color:'#fff' }}>الإيجار الشهري</h1>
+          <p style={{ margin:0, fontSize:'12px', color:'rgba(255,255,255,0.6)' }}>
+            {activeTenants.length} مستأجر نشط
+            {expiringTenants.length > 0 && ` · ⚠️ ${expiringTenants.length} عقد يقترب`}
+          </p>
+        </div>
+        <div style={{ display:'flex', gap:'8px', alignItems:'center' }}>
+          {properties.length > 1 && (
+            <select value={propId} onChange={e => { setPropId(e.target.value); const p=properties.find(x=>x.id===e.target.value); setPropName(p?.name||''); loadData(e.target.value); }}
+              style={{ border:'none', borderRadius:'8px', padding:'6px 10px', fontSize:'12px', background:'rgba(255,255,255,0.15)', color:'#fff' }}>
+              {properties.map(p => <option key={p.id} value={p.id} style={{ color:'#000' }}>{p.name}</option>)}
+            </select>
+          )}
+          {canEdit && (
+            <button onClick={openAdd}
+              style={{ background:'#D4AC0D', border:'none', borderRadius:'10px', padding:'10px 14px', cursor:'pointer', color:'#fff', fontSize:'13px', fontWeight:'600' }}>
+              + مستأجر
+            </button>
+          )}
+        </div>
+      </div>
 
       <div style={{ padding:'16px', maxWidth:'900px', margin:'0 auto' }}>
 
         {/* ══ SEARCH & FILTER BAR ══ */}
         <div style={{ background:'#fff', borderRadius:'16px', border:'1px solid #e5e7eb', padding:'16px', marginBottom:'16px', display:'flex', flexDirection:'column', gap:'12px' }}>
-
-          {/* Search Input */}
           <div style={{ position:'relative' }}>
             <span style={{ position:'absolute', right:'14px', top:'50%', transform:'translateY(-50%)', fontSize:'16px', color:'#9ca3af', pointerEvents:'none' }}>🔍</span>
-            <input
-              type="text"
-              value={searchQuery}
-              onChange={e => setSearchQuery(e.target.value)}
+            <input type="text" value={searchQuery} onChange={e => setSearchQuery(e.target.value)}
               placeholder="ابحث برقم الشقة أو اسم المستأجر..."
-              style={{ width:'100%', border:'1.5px solid #e5e7eb', borderRadius:'12px', padding:'11px 42px 11px 14px', fontSize:'14px', fontFamily:'sans-serif', color:'#111827', background:'#F5F7FA', outline:'none', boxSizing:'border-box', transition:'border-color 0.2s' }}
+              style={{ width:'100%', border:'1.5px solid #e5e7eb', borderRadius:'12px', padding:'11px 42px 11px 14px', fontSize:'14px', fontFamily:'sans-serif', color:'#111827', background:'#f9fafb', outline:'none', boxSizing:'border-box', transition:'border-color 0.2s' }}
               onFocus={e => e.currentTarget.style.borderColor = '#1B4F72'}
-              onBlur={e  => e.currentTarget.style.borderColor = '#e5e7eb'}
-            />
+              onBlur={e  => e.currentTarget.style.borderColor = '#e5e7eb'} />
             {searchQuery && (
-              <button
-                onClick={() => setSearchQuery('')}
-                style={{ position:'absolute', left:'12px', top:'50%', transform:'translateY(-50%)', background:'none', border:'none', cursor:'pointer', fontSize:'18px', color:'#9ca3af', lineHeight:'1' }}
-              >
-                ×
-              </button>
+              <button onClick={() => setSearchQuery('')}
+                style={{ position:'absolute', left:'12px', top:'50%', transform:'translateY(-50%)', background:'none', border:'none', cursor:'pointer', fontSize:'18px', color:'#9ca3af', lineHeight:'1' }}>×</button>
             )}
           </div>
-
-          {/* Filter Chips Row */}
           <div style={{ display:'flex', gap:'8px', flexWrap:'wrap', alignItems:'center' }}>
-
-            {/* Payment Status Filter */}
             <div style={{ display:'flex', gap:'4px', background:'#f3f4f6', borderRadius:'10px', padding:'4px' }}>
               {([
-                { val:'all',      label:'الكل' },
-                { val:'late',     label:'⚠️ متأخر' },
-                { val:'partial',  label:'🟡 جزئي' },
-                { val:'paid',     label:'✅ مسدد' },
+                { val:'all', label:'الكل' },
+                { val:'late', label:'⚠️ متأخر' },
+                { val:'partial', label:'🟡 جزئي' },
+                { val:'paid', label:'✅ مسدد' },
                 { val:'upcoming', label:'⏳ قادم' },
               ] as const).map(f => (
-                <button
-                  key={f.val}
-                  onClick={() => setFilterStatus(f.val)}
-                  style={{ padding:'6px 12px', borderRadius:'8px', border:'none', cursor:'pointer', fontSize:'12px', fontWeight: filterStatus===f.val ? '700' : '400', background: filterStatus===f.val ? '#fff' : 'transparent', color: filterStatus===f.val ? '#1B4F72' : '#6b7280', boxShadow: filterStatus===f.val ? '0 1px 3px rgba(0,0,0,0.1)' : 'none', transition:'all 0.15s', fontFamily:'sans-serif', whiteSpace:'nowrap' }}
-                >
+                <button key={f.val} onClick={() => setFilterStatus(f.val)}
+                  style={{ padding:'6px 12px', borderRadius:'8px', border:'none', cursor:'pointer', fontSize:'12px', fontWeight: filterStatus===f.val ? '700' : '400', background: filterStatus===f.val ? '#fff' : 'transparent', color: filterStatus===f.val ? '#1B4F72' : '#6b7280', boxShadow: filterStatus===f.val ? '0 1px 3px rgba(0,0,0,0.1)' : 'none', transition:'all 0.15s', fontFamily:'sans-serif', whiteSpace:'nowrap' }}>
                   {f.label}
                 </button>
               ))}
             </div>
-
-            {/* Unit Type Filter */}
             <div style={{ display:'flex', gap:'4px', background:'#f3f4f6', borderRadius:'10px', padding:'4px' }}>
               {([
-                { val:'all',      label:'كل الأنواع' },
-                { val:'monthly',  label:'شهري' },
-                { val:'owner',    label:'خاصة' },
+                { val:'all', label:'كل الأنواع' },
+                { val:'monthly', label:'شهري' },
+                { val:'owner', label:'خاصة' },
               ] as const).map(f => (
-                <button
-                  key={f.val}
-                  onClick={() => setFilterType(f.val)}
-                  style={{ padding:'6px 12px', borderRadius:'8px', border:'none', cursor:'pointer', fontSize:'12px', fontWeight: filterType===f.val ? '700' : '400', background: filterType===f.val ? '#fff' : 'transparent', color: filterType===f.val ? '#1B4F72' : '#6b7280', boxShadow: filterType===f.val ? '0 1px 3px rgba(0,0,0,0.1)' : 'none', transition:'all 0.15s', fontFamily:'sans-serif', whiteSpace:'nowrap' }}
-                >
+                <button key={f.val} onClick={() => setFilterType(f.val)}
+                  style={{ padding:'6px 12px', borderRadius:'8px', border:'none', cursor:'pointer', fontSize:'12px', fontWeight: filterType===f.val ? '700' : '400', background: filterType===f.val ? '#fff' : 'transparent', color: filterType===f.val ? '#1B4F72' : '#6b7280', boxShadow: filterType===f.val ? '0 1px 3px rgba(0,0,0,0.1)' : 'none', transition:'all 0.15s', fontFamily:'sans-serif', whiteSpace:'nowrap' }}>
                   {f.label}
                 </button>
               ))}
             </div>
-
-            {/* Results Count */}
             {(searchQuery || filterStatus !== 'all' || filterType !== 'all') && (
               <div style={{ display:'flex', alignItems:'center', gap:'8px', marginRight:'auto' }}>
-                <span style={{ fontSize:'12px', color:'#6b7280' }}>
-                  {filteredActiveTenants.length} نتيجة
-                </span>
-                <button
-                  onClick={() => { setSearchQuery(''); setFilterStatus('all'); setFilterType('all'); }}
-                  style={{ fontSize:'12px', color:'#dc2626', background:'#fee2e2', border:'none', borderRadius:'6px', padding:'4px 10px', cursor:'pointer', fontFamily:'sans-serif' }}
-                >
+                <span style={{ fontSize:'12px', color:'#6b7280' }}>{filteredActiveTenants.length} نتيجة</span>
+                <button onClick={() => { setSearchQuery(''); setFilterStatus('all'); setFilterType('all'); }}
+                  style={{ fontSize:'12px', color:'#dc2626', background:'#fee2e2', border:'none', borderRadius:'6px', padding:'4px 10px', cursor:'pointer', fontFamily:'sans-serif' }}>
                   مسح الفلاتر
                 </button>
               </div>
             )}
           </div>
-
-          {/* Quick Unit Number Chips — show all unit numbers for fast filter */}
           {units.filter(u => u.type !== 'furnished' && u.status === 'occupied').length > 0 && (
             <div style={{ display:'flex', gap:'6px', flexWrap:'wrap' }}>
               <span style={{ fontSize:'11px', color:'#9ca3af', alignSelf:'center', whiteSpace:'nowrap' }}>شقة:</span>
-              {units
-                .filter(u => u.type !== 'furnished' && u.status === 'occupied')
+              {units.filter(u => u.type !== 'furnished' && u.status === 'occupied')
                 .sort((a,b) => a.unitNumber.localeCompare(b.unitNumber, undefined, { numeric:true }))
                 .map(u => (
-                  <button
-                    key={u.id}
-                    onClick={() => setSearchQuery(searchQuery === u.unitNumber ? '' : u.unitNumber)}
-                    style={{ padding:'4px 10px', borderRadius:'8px', border:'1.5px solid', cursor:'pointer', fontSize:'12px', fontWeight:'600', fontFamily:'sans-serif', transition:'all 0.15s', borderColor: searchQuery===u.unitNumber ? '#1B4F72' : '#e5e7eb', background: searchQuery===u.unitNumber ? '#eff6ff' : '#f9fafb', color: searchQuery===u.unitNumber ? '#1B4F72' : '#6b7280' }}
-                  >
+                  <button key={u.id} onClick={() => setSearchQuery(searchQuery === u.unitNumber ? '' : u.unitNumber)}
+                    style={{ padding:'4px 10px', borderRadius:'8px', border:'1.5px solid', cursor:'pointer', fontSize:'12px', fontWeight:'600', fontFamily:'sans-serif', transition:'all 0.15s', borderColor: searchQuery===u.unitNumber ? '#1B4F72' : '#e5e7eb', background: searchQuery===u.unitNumber ? '#eff6ff' : '#f9fafb', color: searchQuery===u.unitNumber ? '#1B4F72' : '#6b7280' }}>
                     {u.unitNumber}
                   </button>
-                ))
-              }
+                ))}
             </div>
           )}
         </div>
@@ -512,11 +526,8 @@ export default function MonthlyPage() {
             ['former',   `السابقون (${formerTenants.length})`],
             ['archive',  '📁 الأرشيف'],
           ] as const).map(([id, label]) => (
-            <button
-              key={id}
-              onClick={() => setTab(id)}
-              style={{ flex:1, padding:'8px 6px', border:'none', borderRadius:'10px', cursor:'pointer', fontSize:'12px', fontWeight: tab===id ? '600' : '400', background: tab===id ? '#1B4F72' : 'transparent', color: tab===id ? '#fff' : '#6b7280', whiteSpace:'nowrap', transition:'all 0.15s', fontFamily:'sans-serif' }}
-            >
+            <button key={id} onClick={() => setTab(id)}
+              style={{ flex:1, padding:'8px 6px', border:'none', borderRadius:'10px', cursor:'pointer', fontSize:'12px', fontWeight: tab===id ? '600' : '400', background: tab===id ? '#1B4F72' : 'transparent', color: tab===id ? '#fff' : '#6b7280', whiteSpace:'nowrap', transition:'all 0.15s', fontFamily:'sans-serif' }}>
               {label}
             </button>
           ))}
@@ -525,12 +536,9 @@ export default function MonthlyPage() {
         {/* ══ TAB: المستأجرون النشطون ══ */}
         {tab === 'active' && (
           <>
-            {/* Expired Contracts Alert */}
             {expiredTenants.length > 0 && (
               <div style={{ background:'#fee2e2', border:'1px solid #fca5a5', borderRadius:'12px', padding:'12px 16px', marginBottom:'14px' }}>
-                <div style={{ fontSize:'13px', fontWeight:'600', color:'#dc2626', marginBottom:'6px' }}>
-                  ⚠️ {expiredTenants.length} عقد منتهٍ — يحتاج إجراء
-                </div>
+                <div style={{ fontSize:'13px', fontWeight:'600', color:'#dc2626', marginBottom:'6px' }}>⚠️ {expiredTenants.length} عقد منتهٍ — يحتاج إجراء</div>
                 <div style={{ display:'flex', gap:'8px', flexWrap:'wrap' }}>
                   {expiredTenants.map(t => (
                     <button key={t.id} onClick={() => setRenewConfirm(t)}
@@ -541,80 +549,49 @@ export default function MonthlyPage() {
                 </div>
               </div>
             )}
-
-            {/* No Results */}
             {filteredActiveTenants.length === 0 ? (
               <div style={{ background:'#fff', borderRadius:'16px', padding:'40px', textAlign:'center', border:'1px solid #e5e7eb' }}>
-                <div style={{ fontSize:'48px', marginBottom:'12px' }}>
-                  {searchQuery || filterStatus !== 'all' || filterType !== 'all' ? '🔍' : '📋'}
-                </div>
+                <div style={{ fontSize:'48px', marginBottom:'12px' }}>{searchQuery || filterStatus !== 'all' || filterType !== 'all' ? '🔍' : '📋'}</div>
                 <p style={{ color:'#6b7280', margin:'0 0 16px', fontSize:'14px' }}>
-                  {searchQuery || filterStatus !== 'all' || filterType !== 'all'
-                    ? `لا توجد نتائج مطابقة${searchQuery ? ` لـ "${searchQuery}"` : ''}`
-                    : 'لا يوجد مستأجرون نشطون'
-                  }
+                  {searchQuery || filterStatus !== 'all' || filterType !== 'all' ? `لا توجد نتائج مطابقة` : 'لا يوجد مستأجرون نشطون'}
                 </p>
-                {(searchQuery || filterStatus !== 'all' || filterType !== 'all') ? (
-                  <button onClick={() => { setSearchQuery(''); setFilterStatus('all'); setFilterType('all'); }}
-                    style={{ padding:'9px 20px', background:'#f3f4f6', color:'#374151', border:'none', borderRadius:'10px', cursor:'pointer', fontSize:'13px', fontFamily:'sans-serif' }}>
-                    مسح البحث
-                  </button>
-                ) : canEdit && (
+                {canEdit && !searchQuery && filterStatus === 'all' && filterType === 'all' && (
                   <button onClick={openAdd} style={btn1}>+ إضافة مستأجر</button>
                 )}
               </div>
             ) : (
               <div style={{ display:'flex', flexDirection:'column', gap:'10px' }}>
                 {filteredActiveTenants.map(t => {
-                  const tp           = payments.filter(p => p.tenantId === t.id);
-                  const schedule     = buildPaymentSchedule(t, tp);
-                  const currentPeriod= schedule.find(s => s.status==='current'||s.status==='late'||s.status==='partial');
-                  const daysLeft     = daysUntil(t.contractEnd);
-                  const totalArrears = schedule.reduce((s,p) => s+p.balance, 0);
-                  const unit         = units.find(u => u.id === t.unitId);
-
+                  const tp            = payments.filter(p => p.tenantId === t.id);
+                  const schedule      = buildPaymentSchedule(t, tp);
+                  const currentPeriod = schedule.find(s => s.status==='current'||s.status==='late'||s.status==='partial');
+                  const daysLeft      = daysUntil(t.contractEnd);
+                  const totalArrears  = schedule.reduce((s,p) => s+p.balance, 0);
+                  const unit          = units.find(u => u.id === t.unitId);
                   return (
-                    <div key={t.id} style={{ background:'#fff', borderRadius:'14px', border:`1px solid ${daysLeft<0?'#fca5a5':daysLeft<=30?'#fbbf24':'#e5e7eb'}`, overflow:'hidden' }}>
-                      {daysLeft < 0 && (
-                        <div style={{ background:'#fee2e2', padding:'6px 14px', fontSize:'12px', color:'#dc2626', fontWeight:'600' }}>
-                          ⚠️ العقد منتهٍ منذ {Math.abs(daysLeft)} يوم
-                        </div>
-                      )}
-                      {daysLeft >= 0 && daysLeft <= 30 && (
-                        <div style={{ background:'#fef3c7', padding:'6px 14px', fontSize:'12px', color:'#92400e', fontWeight:'600' }}>
-                          ⏰ ينتهي العقد خلال {daysLeft} يوم ({fmtDate(t.contractEnd)})
-                        </div>
-                      )}
+                    <div key={t.id} style={{ background:'#fff', borderRadius:'18px', border:`1px solid ${daysLeft<0?'#fca5a5':daysLeft<=30?'#fbbf24':'#e5e7eb'}`, overflow:'hidden', boxShadow:'0 4px 16px rgba(27,79,114,0.08)' }}>
+                      {daysLeft < 0 && <div style={{ background:'#fee2e2', padding:'6px 14px', fontSize:'12px', color:'#dc2626', fontWeight:'600' }}>⚠️ العقد منتهٍ منذ {Math.abs(daysLeft)} يوم</div>}
+                      {daysLeft >= 0 && daysLeft <= 30 && <div style={{ background:'#fef3c7', padding:'6px 14px', fontSize:'12px', color:'#92400e', fontWeight:'600' }}>⏰ ينتهي العقد خلال {daysLeft} يوم ({fmtDate(t.contractEnd)})</div>}
                       <div style={{ padding:'14px 16px' }}>
                         <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', marginBottom:'10px' }}>
                           <div style={{ display:'flex', alignItems:'center', gap:'10px' }}>
-                            {/* Unit Number Badge */}
-                            <div style={{ background:'#1B4F72', color:'#fff', borderRadius:'8px', padding:'6px 10px', fontSize:'14px', fontWeight:'700', minWidth:'42px', textAlign:'center' }}>
-                              {t.unitNumber}
-                            </div>
+                            <div style={{ background:'#1B4F72', color:'#fff', borderRadius:'8px', padding:'6px 10px', fontSize:'14px', fontWeight:'700', minWidth:'42px', textAlign:'center' }}>{t.unitNumber}</div>
                             <div>
                               <div style={{ fontSize:'15px', fontWeight:'600', color:'#111827' }}>{t.name}</div>
                               <div style={{ fontSize:'12px', color:'#9ca3af' }}>{t.phone}</div>
                             </div>
                           </div>
                           <div style={{ textAlign:'left' }}>
-                            <div style={{ fontSize:'15px', fontWeight:'700', color:'#1B4F72' }}>
-                              {t.rentAmount.toLocaleString('ar-SA')} ر.س
-                            </div>
+                            <div style={{ fontSize:'15px', fontWeight:'700', color:'#1B4F72' }}>{t.rentAmount.toLocaleString('ar-SA')} ر.س</div>
                             <div style={{ fontSize:'11px', color:'#9ca3af' }}>{CYCLE[t.paymentCycle]}</div>
-                            {unit && (
-                              <span style={{ fontSize:'10px', background:unit.type==='monthly'?'#dbeafe':'#fef3c7', color:unit.type==='monthly'?'#1e40af':'#92400e', padding:'1px 6px', borderRadius:'6px', marginTop:'3px', display:'inline-block' }}>
-                                {unit.type==='monthly'?'شهري':'خاصة'}
-                              </span>
-                            )}
+                            {unit && <span style={{ fontSize:'10px', background:unit.type==='monthly'?'#dbeafe':'#fef3c7', color:unit.type==='monthly'?'#1e40af':'#92400e', padding:'1px 6px', borderRadius:'6px', marginTop:'3px', display:'inline-block' }}>{unit.type==='monthly'?'شهري':'خاصة'}</span>}
                           </div>
                         </div>
-
                         <div style={{ display:'grid', gridTemplateColumns:'repeat(3,1fr)', gap:'8px', marginBottom:'12px' }}>
                           {[
                             ['بداية العقد', fmtDate(t.contractStart)],
                             ['نهاية العقد', fmtDate(t.contractEnd)],
-                            ['المتأخرات',   totalArrears>0 ? totalArrears.toLocaleString('ar-SA')+' ر.س' : '✅ لا يوجد'],
+                            ['المتأخرات', totalArrears>0 ? totalArrears.toLocaleString('ar-SA')+' ر.س' : '✅ لا يوجد'],
                           ].map(([l,v]) => (
                             <div key={String(l)} style={{ background:'#f9fafb', borderRadius:'8px', padding:'8px', textAlign:'center' }}>
                               <div style={{ fontSize:'10px', color:'#9ca3af', marginBottom:'3px' }}>{l}</div>
@@ -622,55 +599,29 @@ export default function MonthlyPage() {
                             </div>
                           ))}
                         </div>
-
                         {currentPeriod && (
                           <div style={{ background:currentPeriod.status==='late'?'#fee2e2':currentPeriod.status==='partial'?'#fef3c7':'#f0f9ff', borderRadius:'10px', padding:'10px 12px', marginBottom:'12px', display:'flex', justifyContent:'space-between', alignItems:'center' }}>
                             <div>
                               <div style={{ fontSize:'12px', fontWeight:'600', color:'#374151' }}>{currentPeriod.label}</div>
-                              <div style={{ fontSize:'11px', color:'#6b7280' }}>
-                                المطلوب: {currentPeriod.due.toLocaleString('ar-SA')} ر.س
-                                {currentPeriod.paid>0 && ` · مدفوع: ${currentPeriod.paid.toLocaleString('ar-SA')} ر.س`}
-                              </div>
+                              <div style={{ fontSize:'11px', color:'#6b7280' }}>المطلوب: {currentPeriod.due.toLocaleString('ar-SA')} ر.س{currentPeriod.paid>0 && ` · مدفوع: ${currentPeriod.paid.toLocaleString('ar-SA')} ر.س`}</div>
                             </div>
                             <span style={{ padding:'3px 10px', borderRadius:'8px', fontSize:'11px', fontWeight:'600', background:currentPeriod.status==='late'?'#dc2626':currentPeriod.status==='partial'?'#d97706':'#1e40af', color:'#fff' }}>
                               {currentPeriod.status==='late'?'متأخر':currentPeriod.status==='partial'?'جزئي':'مستحق'}
                             </span>
                           </div>
                         )}
-
                         <div style={{ display:'flex', gap:'8px', flexWrap:'wrap' }}>
-                          <button
-                            onClick={() => {
-                              const period = schedule.find(p => p.status!=='paid')||schedule[0];
-                              setShowPay({ tenant:t, period });
-                              setPf(f => ({ ...f, amountDue:String(period?.balance||t.rentAmount), amountPaid:'' }));
-                            }}
-                            style={{ flex:1, padding:'9px', background:'#1B4F72', color:'#fff', border:'none', borderRadius:'8px', cursor:'pointer', fontSize:'13px', fontWeight:'600', fontFamily:'sans-serif' }}
-                          >
+                          <button onClick={() => { const period = schedule.find(p => p.status!=='paid')||schedule[0]; setShowPay({ tenant:t, period }); setPf(f => ({ ...f, amountDue:String(period?.balance||t.rentAmount), amountPaid:'' })); }}
+                            style={{ flex:1, padding:'9px', background:'#1B4F72', color:'#fff', border:'none', borderRadius:'8px', cursor:'pointer', fontSize:'13px', fontWeight:'600', fontFamily:'sans-serif' }}>
                             💰 تسجيل دفعة
                           </button>
                           <button onClick={() => router.push(`/monthly/${t.id}`)}
                             style={{ padding:'9px 14px', background:'#fff', border:'1px solid #e5e7eb', borderRadius:'8px', cursor:'pointer', fontSize:'13px', fontFamily:'sans-serif' }}>
                             👁️ تفاصيل
                           </button>
-                          {canEdit && (
-                            <button onClick={() => openEdit(t)}
-                              style={{ padding:'9px 14px', background:'#fff', border:'1px solid #e5e7eb', borderRadius:'8px', cursor:'pointer', fontSize:'13px', fontFamily:'sans-serif' }}>
-                              ✏️
-                            </button>
-                          )}
-                          {canDeleteTenant && (
-                            <button onClick={() => setDeleteTenantConfirm(t)}
-                              style={{ padding:'9px 12px', background:'#fff', border:'1px solid #fca5a5', borderRadius:'8px', cursor:'pointer', fontSize:'13px', color:'#dc2626', fontFamily:'sans-serif' }}>
-                              🗑️
-                            </button>
-                          )}
-                          {(daysLeft<0||daysLeft<=30) && (
-                            <button onClick={() => setRenewConfirm(t)}
-                              style={{ padding:'9px 12px', background:'#d1fae5', color:'#065f46', border:'1px solid #6ee7b7', borderRadius:'8px', cursor:'pointer', fontSize:'12px', fontWeight:'600', fontFamily:'sans-serif' }}>
-                              🔄 تجديد
-                            </button>
-                          )}
+                          {canEdit && <button onClick={() => openEdit(t)} style={{ padding:'9px 14px', background:'#fff', border:'1px solid #e5e7eb', borderRadius:'8px', cursor:'pointer', fontSize:'13px', fontFamily:'sans-serif' }}>✏️</button>}
+                          {canDeleteTenant && <button onClick={() => setDeleteTenantConfirm(t)} style={{ padding:'9px 12px', background:'#fff', border:'1px solid #fca5a5', borderRadius:'8px', cursor:'pointer', fontSize:'13px', color:'#dc2626', fontFamily:'sans-serif' }}>🗑️</button>}
+                          {(daysLeft<0||daysLeft<=30) && <button onClick={() => setRenewConfirm(t)} style={{ padding:'9px 12px', background:'#d1fae5', color:'#065f46', border:'1px solid #6ee7b7', borderRadius:'8px', cursor:'pointer', fontSize:'12px', fontWeight:'600', fontFamily:'sans-serif' }}>🔄 تجديد</button>}
                         </div>
                       </div>
                     </div>
@@ -705,21 +656,11 @@ export default function MonthlyPage() {
                   <div style={{ overflowX:'auto' }}>
                     <table style={{ width:'100%', borderCollapse:'collapse', fontSize:'13px' }}>
                       <thead style={{ background:'#f9fafb' }}>
-                        <tr>
-                          {['الفترة','المستحق','المدفوع','المتبقي','الحالة',''].map(h => (
-                            <th key={h} style={{ padding:'8px 12px', textAlign:'right', color:'#6b7280', fontWeight:'500', borderBottom:'1px solid #e5e7eb', fontSize:'12px' }}>{h}</th>
-                          ))}
-                        </tr>
+                        <tr>{['الفترة','المستحق','المدفوع','المتبقي','الحالة',''].map(h => <th key={h} style={{ padding:'8px 12px', textAlign:'right', color:'#6b7280', fontWeight:'500', borderBottom:'1px solid #e5e7eb', fontSize:'12px' }}>{h}</th>)}</tr>
                       </thead>
                       <tbody>
                         {schedule.map((row,i) => {
-                          const c = ({
-                            paid:    { bg:'#d1fae5', color:'#065f46', label:'✅ مسدد' },
-                            partial: { bg:'#fef3c7', color:'#92400e', label:'⚠️ جزئي' },
-                            late:    { bg:'#fee2e2', color:'#dc2626', label:'🔴 متأخر' },
-                            current: { bg:'#dbeafe', color:'#1e40af', label:'📌 مستحق' },
-                            upcoming:{ bg:'#f3f4f6', color:'#6b7280', label:'⏳ قادم' },
-                          } as any)[row.status] || { bg:'#f3f4f6', color:'#374151', label:row.status };
+                          const c = ({ paid:{bg:'#d1fae5',color:'#065f46',label:'✅ مسدد'}, partial:{bg:'#fef3c7',color:'#92400e',label:'⚠️ جزئي'}, late:{bg:'#fee2e2',color:'#dc2626',label:'🔴 متأخر'}, current:{bg:'#dbeafe',color:'#1e40af',label:'📌 مستحق'}, upcoming:{bg:'#f3f4f6',color:'#6b7280',label:'⏳ قادم'} } as any)[row.status] || { bg:'#f3f4f6', color:'#374151', label:row.status };
                           return (
                             <tr key={i} style={{ borderBottom:'1px solid #f3f4f6', background:i%2===0?'#fafafa':'#fff' }}>
                               <td style={{ padding:'10px 12px', fontWeight:'500', color:'#374151' }}>{row.label}</td>
@@ -731,15 +672,9 @@ export default function MonthlyPage() {
                                 {row.status!=='paid'&&canEdit&&(
                                   <div style={{ display:'flex', gap:'6px' }}>
                                     <button onClick={() => { setShowPay({ tenant:t, period:row }); setPf(f => ({ ...f, amountDue:String(row.balance), amountPaid:String(row.balance), periodMonth:row.month, periodYear:row.year })); }}
-                                      style={{ padding:'4px 10px', background:'#d1fae5', color:'#065f46', border:'none', borderRadius:'6px', cursor:'pointer', fontSize:'11px', fontWeight:'600', fontFamily:'sans-serif' }}>
-                                      سدد
-                                    </button>
-                                    {row.status!=='upcoming'&&(
-                                      <button onClick={() => { setPartialPay({ period:row, tenant:t }); setPf(f => ({ ...f, amountDue:String(row.due), amountPaid:'', periodMonth:row.month, periodYear:row.year })); }}
-                                        style={{ padding:'4px 10px', background:'#fef3c7', color:'#92400e', border:'none', borderRadius:'6px', cursor:'pointer', fontSize:'11px', fontFamily:'sans-serif' }}>
-                                        جزئي
-                                      </button>
-                                    )}
+                                      style={{ padding:'4px 10px', background:'#d1fae5', color:'#065f46', border:'none', borderRadius:'6px', cursor:'pointer', fontSize:'11px', fontWeight:'600', fontFamily:'sans-serif' }}>سدد</button>
+                                    {row.status!=='upcoming'&&<button onClick={() => { setPartialPay({ period:row, tenant:t }); setPf(f => ({ ...f, amountDue:String(row.due), amountPaid:'', periodMonth:row.month, periodYear:row.year })); }}
+                                      style={{ padding:'4px 10px', background:'#fef3c7', color:'#92400e', border:'none', borderRadius:'6px', cursor:'pointer', fontSize:'11px', fontFamily:'sans-serif' }}>جزئي</button>}
                                   </div>
                                 )}
                               </td>
@@ -758,70 +693,19 @@ export default function MonthlyPage() {
         {/* ══ TAB: تنبيهات ══ */}
         {tab === 'expiring' && (
           <div>
-            {expiredTenants.length>0&&(
-              <div style={{ marginBottom:'20px' }}>
-                <div style={{ fontSize:'14px', fontWeight:'600', color:'#dc2626', marginBottom:'10px' }}>🔴 عقود منتهية ({expiredTenants.length})</div>
-                {expiredTenants.map(t=>(
-                  <div key={t.id} style={{ background:'#fff', borderRadius:'12px', padding:'14px 16px', border:'1px solid #fca5a5', marginBottom:'8px', display:'flex', alignItems:'center', gap:'12px' }}>
-                    <div style={{ background:'#dc2626', color:'#fff', borderRadius:'8px', padding:'6px 10px', fontSize:'13px', fontWeight:'700' }}>{t.unitNumber}</div>
-                    <div style={{ flex:1 }}>
-                      <div style={{ fontSize:'14px', fontWeight:'600', color:'#111827' }}>{t.name}</div>
-                      <div style={{ fontSize:'12px', color:'#dc2626' }}>انتهى: {fmtDate(t.contractEnd)} (منذ {Math.abs(daysUntil(t.contractEnd))} يوم)</div>
-                    </div>
-                    <button onClick={() => setRenewConfirm(t)} style={{ padding:'8px 16px', background:'#d1fae5', color:'#065f46', border:'1px solid #6ee7b7', borderRadius:'8px', cursor:'pointer', fontSize:'13px', fontWeight:'600', fontFamily:'sans-serif' }}>
-                      🔄 تجديد
-                    </button>
-                  </div>
-                ))}
-              </div>
-            )}
-            {expiringTenants.filter(t=>daysUntil(t.contractEnd)>=0).length>0&&(
-              <div>
-                <div style={{ fontSize:'14px', fontWeight:'600', color:'#d97706', marginBottom:'10px' }}>⚠️ تنتهي خلال 30 يوم</div>
-                {expiringTenants.filter(t=>daysUntil(t.contractEnd)>=0).map(t=>(
-                  <div key={t.id} style={{ background:'#fff', borderRadius:'12px', padding:'14px 16px', border:'1px solid #fbbf24', marginBottom:'8px', display:'flex', alignItems:'center', gap:'12px' }}>
-                    <div style={{ background:'#d97706', color:'#fff', borderRadius:'8px', padding:'6px 10px', fontSize:'13px', fontWeight:'700' }}>{t.unitNumber}</div>
-                    <div style={{ flex:1 }}>
-                      <div style={{ fontSize:'14px', fontWeight:'600', color:'#111827' }}>{t.name}</div>
-                      <div style={{ fontSize:'12px', color:'#d97706' }}>ينتهي: {fmtDate(t.contractEnd)} (بعد {daysUntil(t.contractEnd)} يوم)</div>
-                    </div>
-                    <button onClick={() => setRenewConfirm(t)} style={{ padding:'8px 16px', background:'#fef3c7', color:'#92400e', border:'1px solid #fbbf24', borderRadius:'8px', cursor:'pointer', fontSize:'13px', fontWeight:'600', fontFamily:'sans-serif' }}>
-                      🔄 تجديد مسبق
-                    </button>
-                  </div>
-                ))}
-              </div>
-            )}
-            {expiringTenants.length===0&&expiredTenants.length===0&&(
-              <div style={{ background:'#fff', borderRadius:'16px', padding:'40px', textAlign:'center', border:'1px solid #e5e7eb' }}>
-                <div style={{ fontSize:'48px', marginBottom:'12px' }}>✅</div>
-                <p style={{ color:'#6b7280' }}>لا توجد عقود تحتاج انتباه</p>
-              </div>
-            )}
+            {expiredTenants.length>0&&(<div style={{ marginBottom:'20px' }}><div style={{ fontSize:'14px', fontWeight:'600', color:'#dc2626', marginBottom:'10px' }}>🔴 عقود منتهية ({expiredTenants.length})</div>{expiredTenants.map(t=>(<div key={t.id} style={{ background:'#fff', borderRadius:'12px', padding:'14px 16px', border:'1px solid #fca5a5', marginBottom:'8px', display:'flex', alignItems:'center', gap:'12px' }}><div style={{ background:'#dc2626', color:'#fff', borderRadius:'8px', padding:'6px 10px', fontSize:'13px', fontWeight:'700' }}>{t.unitNumber}</div><div style={{ flex:1 }}><div style={{ fontSize:'14px', fontWeight:'600', color:'#111827' }}>{t.name}</div><div style={{ fontSize:'12px', color:'#dc2626' }}>انتهى: {fmtDate(t.contractEnd)} (منذ {Math.abs(daysUntil(t.contractEnd))} يوم)</div></div><button onClick={() => setRenewConfirm(t)} style={{ padding:'8px 16px', background:'#d1fae5', color:'#065f46', border:'1px solid #6ee7b7', borderRadius:'8px', cursor:'pointer', fontSize:'13px', fontWeight:'600', fontFamily:'sans-serif' }}>🔄 تجديد</button></div>))}</div>)}
+            {expiringTenants.filter(t=>daysUntil(t.contractEnd)>=0).length>0&&(<div><div style={{ fontSize:'14px', fontWeight:'600', color:'#d97706', marginBottom:'10px' }}>⚠️ تنتهي خلال 30 يوم</div>{expiringTenants.filter(t=>daysUntil(t.contractEnd)>=0).map(t=>(<div key={t.id} style={{ background:'#fff', borderRadius:'12px', padding:'14px 16px', border:'1px solid #fbbf24', marginBottom:'8px', display:'flex', alignItems:'center', gap:'12px' }}><div style={{ background:'#d97706', color:'#fff', borderRadius:'8px', padding:'6px 10px', fontSize:'13px', fontWeight:'700' }}>{t.unitNumber}</div><div style={{ flex:1 }}><div style={{ fontSize:'14px', fontWeight:'600', color:'#111827' }}>{t.name}</div><div style={{ fontSize:'12px', color:'#d97706' }}>ينتهي: {fmtDate(t.contractEnd)} (بعد {daysUntil(t.contractEnd)} يوم)</div></div><button onClick={() => setRenewConfirm(t)} style={{ padding:'8px 16px', background:'#fef3c7', color:'#92400e', border:'1px solid #fbbf24', borderRadius:'8px', cursor:'pointer', fontSize:'13px', fontWeight:'600', fontFamily:'sans-serif' }}>🔄 تجديد مسبق</button></div>))}</div>)}
+            {expiringTenants.length===0&&expiredTenants.length===0&&(<div style={{ background:'#fff', borderRadius:'16px', padding:'40px', textAlign:'center', border:'1px solid #e5e7eb' }}><div style={{ fontSize:'48px', marginBottom:'12px' }}>✅</div><p style={{ color:'#6b7280' }}>لا توجد عقود تحتاج انتباه</p></div>)}
           </div>
         )}
 
         {/* ══ TAB: السابقون ══ */}
         {tab === 'former' && (
           formerTenants.length===0 ? (
-            <div style={{ background:'#fff', borderRadius:'16px', padding:'40px', textAlign:'center', border:'1px solid #e5e7eb' }}>
-              <div style={{ fontSize:'48px', marginBottom:'12px' }}>👥</div>
-              <p style={{ color:'#6b7280' }}>لا يوجد مستأجرون سابقون</p>
-            </div>
+            <div style={{ background:'#fff', borderRadius:'16px', padding:'40px', textAlign:'center', border:'1px solid #e5e7eb' }}><div style={{ fontSize:'48px', marginBottom:'12px' }}>👥</div><p style={{ color:'#6b7280' }}>لا يوجد مستأجرون سابقون</p></div>
           ) : (
             <div style={{ display:'flex', flexDirection:'column', gap:'8px' }}>
-              {formerTenants.map(t=>(
-                <div key={t.id} style={{ background:'#fff', borderRadius:'12px', padding:'14px 16px', border:'1px solid #e5e7eb', opacity:0.85, display:'flex', alignItems:'center', gap:'12px' }}>
-                  <div style={{ background:'#6b7280', color:'#fff', borderRadius:'8px', padding:'6px 10px', fontSize:'13px', fontWeight:'700' }}>{t.unitNumber}</div>
-                  <div style={{ flex:1 }}>
-                    <div style={{ fontSize:'14px', fontWeight:'600', color:'#374151' }}>{t.name}</div>
-                    <div style={{ fontSize:'12px', color:'#9ca3af' }}>{fmtDate(t.contractStart)} → {fmtDate(t.contractEnd)} · {t.rentAmount?.toLocaleString('ar-SA')} ر.س</div>
-                  </div>
-                  <span style={{ background:'#f3f4f6', color:'#6b7280', padding:'3px 10px', borderRadius:'10px', fontSize:'11px' }}>مغادر</span>
-                  {canEdit&&<button onClick={()=>openEdit(t)} style={{ padding:'6px 12px', background:'#fff', border:'1px solid #d1d5db', borderRadius:'8px', cursor:'pointer', fontSize:'12px', fontFamily:'sans-serif' }}>تعديل</button>}
-                  {canDeleteTenant&&<button onClick={()=>setDeleteTenantConfirm(t)} style={{ padding:'6px 12px', background:'#fff', border:'1px solid #fca5a5', borderRadius:'8px', cursor:'pointer', fontSize:'12px', color:'#dc2626', fontFamily:'sans-serif' }}>🗑️ حذف</button>}
-                </div>
-              ))}
+              {formerTenants.map(t=>(<div key={t.id} style={{ background:'#fff', borderRadius:'12px', padding:'14px 16px', border:'1px solid #e5e7eb', opacity:0.85, display:'flex', alignItems:'center', gap:'12px' }}><div style={{ background:'#6b7280', color:'#fff', borderRadius:'8px', padding:'6px 10px', fontSize:'13px', fontWeight:'700' }}>{t.unitNumber}</div><div style={{ flex:1 }}><div style={{ fontSize:'14px', fontWeight:'600', color:'#374151' }}>{t.name}</div><div style={{ fontSize:'12px', color:'#9ca3af' }}>{fmtDate(t.contractStart)} → {fmtDate(t.contractEnd)} · {t.rentAmount?.toLocaleString('ar-SA')} ر.س</div></div><span style={{ background:'#f3f4f6', color:'#6b7280', padding:'3px 10px', borderRadius:'10px', fontSize:'11px' }}>مغادر</span>{canEdit&&<button onClick={()=>openEdit(t)} style={{ padding:'6px 12px', background:'#fff', border:'1px solid #d1d5db', borderRadius:'8px', cursor:'pointer', fontSize:'12px', fontFamily:'sans-serif' }}>تعديل</button>}{canDeleteTenant&&<button onClick={()=>setDeleteTenantConfirm(t)} style={{ padding:'6px 12px', background:'#fff', border:'1px solid #fca5a5', borderRadius:'8px', cursor:'pointer', fontSize:'12px', color:'#dc2626', fontFamily:'sans-serif' }}>🗑️ حذف</button>}</div>))}
             </div>
           )
         )}
@@ -833,35 +717,12 @@ export default function MonthlyPage() {
             <div style={{ background:'#fff', borderRadius:'14px', border:'1px solid #e5e7eb', overflow:'hidden' }}>
               <div style={{ overflowX:'auto' }}>
                 <table style={{ width:'100%', borderCollapse:'collapse', fontSize:'12px' }}>
-                  <thead style={{ background:'#1B4F72' }}>
-                    <tr>
-                      {['الشقة','الاسم','رقم الهوية','الجوال','من','إلى','مدة الإقامة','الحالة','ملاحظات'].map(h=>(
-                        <th key={h} style={{ padding:'10px', textAlign:'right', color:'#fff', fontWeight:'500', fontSize:'11px', whiteSpace:'nowrap' }}>{h}</th>
-                      ))}
-                    </tr>
-                  </thead>
+                  <thead style={{ background:'#1B4F72' }}><tr>{['الشقة','الاسم','رقم الهوية','الجوال','من','إلى','مدة الإقامة','الحالة','ملاحظات'].map(h=>(<th key={h} style={{ padding:'10px', textAlign:'right', color:'#fff', fontWeight:'500', fontSize:'11px', whiteSpace:'nowrap' }}>{h}</th>))}</tr></thead>
                   <tbody>
                     {tenants.sort((a,b)=>(b.contractStart?.seconds||0)-(a.contractStart?.seconds||0)).map((t,i)=>{
-                      const start    = toDate(t.contractStart);
-                      const end      = toDate(t.contractEnd);
-                      const duration = start&&end ? Math.max(0,Math.floor((end.getTime()-start.getTime())/(1000*60*60*24*30)))+' شهر' : '—';
-                      return (
-                        <tr key={t.id} style={{ borderBottom:'1px solid #f3f4f6', background:i%2===0?'#fafafa':'#fff' }}>
-                          <td style={{ padding:'9px 10px', fontWeight:'700', color:'#1B4F72' }}>{t.unitNumber}</td>
-                          <td style={{ padding:'9px 10px', fontWeight:'500', color:'#111827' }}>{t.name}</td>
-                          <td style={{ padding:'9px 10px', color:'#6b7280', direction:'ltr' }}>{t.idNumber||'—'}</td>
-                          <td style={{ padding:'9px 10px', color:'#6b7280', direction:'ltr' }}>{t.phone||'—'}</td>
-                          <td style={{ padding:'9px 10px', color:'#6b7280' }}>{fmtDate(t.contractStart)}</td>
-                          <td style={{ padding:'9px 10px', color:'#6b7280' }}>{fmtDate(t.contractEnd)}</td>
-                          <td style={{ padding:'9px 10px', color:'#374151' }}>{duration}</td>
-                          <td style={{ padding:'9px 10px' }}>
-                            <span style={{ background:t.status==='active'?'#d1fae5':'#f3f4f6', color:t.status==='active'?'#065f46':'#6b7280', padding:'2px 8px', borderRadius:'8px', fontSize:'11px' }}>
-                              {t.status==='active'?'نشط':'مغادر'}
-                            </span>
-                          </td>
-                          <td style={{ padding:'9px 10px', color:'#6b7280', fontSize:'11px', maxWidth:'150px', overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{t.notes||'—'}</td>
-                        </tr>
-                      );
+                      const start=toDate(t.contractStart); const end=toDate(t.contractEnd);
+                      const duration=start&&end?Math.max(0,Math.floor((end.getTime()-start.getTime())/(1000*60*60*24*30)))+' شهر':'—';
+                      return (<tr key={t.id} style={{ borderBottom:'1px solid #f3f4f6', background:i%2===0?'#fafafa':'#fff' }}><td style={{ padding:'9px 10px', fontWeight:'700', color:'#1B4F72' }}>{t.unitNumber}</td><td style={{ padding:'9px 10px', fontWeight:'500', color:'#111827' }}>{t.name}</td><td style={{ padding:'9px 10px', color:'#6b7280', direction:'ltr' }}>{t.idNumber||'—'}</td><td style={{ padding:'9px 10px', color:'#6b7280', direction:'ltr' }}>{t.phone||'—'}</td><td style={{ padding:'9px 10px', color:'#6b7280' }}>{fmtDate(t.contractStart)}</td><td style={{ padding:'9px 10px', color:'#6b7280' }}>{fmtDate(t.contractEnd)}</td><td style={{ padding:'9px 10px', color:'#374151' }}>{duration}</td><td style={{ padding:'9px 10px' }}><span style={{ background:t.status==='active'?'#d1fae5':'#f3f4f6', color:t.status==='active'?'#065f46':'#6b7280', padding:'2px 8px', borderRadius:'8px', fontSize:'11px' }}>{t.status==='active'?'نشط':'مغادر'}</span></td><td style={{ padding:'9px 10px', color:'#6b7280', fontSize:'11px', maxWidth:'150px', overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{t.notes||'—'}</td></tr>);
                     })}
                   </tbody>
                 </table>
@@ -873,10 +734,8 @@ export default function MonthlyPage() {
 
       {/* ══ Modal: إضافة/تعديل مستأجر ══ */}
       {showTenant && canEdit && (
-        <div style={{ position:'fixed', inset:'0', background:'rgba(0,0,0,0.6)', display:'flex', alignItems:'flex-end', justifyContent:'center', zIndex:1000 }}
-          onClick={() => setShowTenant(false)}>
-          <div style={{ background:'#fff', borderRadius:'20px 20px 0 0', padding:'24px', width:'100%', maxWidth:'520px', maxHeight:'92vh', overflowY:'auto' }}
-            onClick={e => e.stopPropagation()}>
+        <div style={{ position:'fixed', inset:'0', background:'rgba(0,0,0,0.6)', display:'flex', alignItems:'flex-end', justifyContent:'center', zIndex:1000 }} onClick={() => setShowTenant(false)}>
+          <div style={{ background:'#fff', borderRadius:'20px 20px 0 0', padding:'24px', width:'100%', maxWidth:'520px', maxHeight:'92vh', overflowY:'auto' }} onClick={e => e.stopPropagation()}>
             <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:'20px' }}>
               <h2 style={{ margin:0, fontSize:'17px', color:'#1B4F72', fontWeight:'600' }}>{editTenant?'تعديل المستأجر':'إضافة مستأجر جديد'}</h2>
               <button onClick={() => setShowTenant(false)} style={{ border:'none', background:'#f3f4f6', borderRadius:'50%', width:'32px', height:'32px', cursor:'pointer', fontSize:'16px' }}>✕</button>
@@ -884,62 +743,27 @@ export default function MonthlyPage() {
             <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:'12px' }}>
               <div style={{ gridColumn:'1 / -1' }}>
                 <label style={lbl}>رقم الشقة <span style={{ color:'#dc2626' }}>*</span></label>
-                <select value={tf.unitId} onChange={e => {
-                  const unit = units.find(u => u.id===e.target.value);
-                  setTf(f => ({ ...f, unitId:e.target.value, rentAmount:f.rentAmount||String(unit?.basePrice||'') }));
-                }} style={inp}>
+                <select value={tf.unitId} onChange={e => { const unit = units.find(u => u.id===e.target.value); setTf(f => ({ ...f, unitId:e.target.value, rentAmount:f.rentAmount||String(unit?.basePrice||'') })); }} style={inp}>
                   <option value="">اختر الشقة...</option>
                   {availableUnits.sort((a,b)=>a.unitNumber.localeCompare(b.unitNumber,undefined,{numeric:true})).map(u=>(
-                    <option key={u.id} value={u.id}>
-                      شقة {u.unitNumber} — {u.type==='monthly'?'شهري':'خاصة'}
-                      {u.basePrice?` (${u.basePrice.toLocaleString('ar-SA')} ر.س)`:''}
-                    </option>
+                    <option key={u.id} value={u.id}>شقة {u.unitNumber} — {u.type==='monthly'?'شهري':'خاصة'}{u.basePrice?` (${u.basePrice.toLocaleString('ar-SA')} ر.س)`:''}</option>
                   ))}
                 </select>
               </div>
               {[['name','اسم المستأجر','text'],['phone','رقم الجوال','tel'],['idNumber','رقم الهوية','text'],['contractNumber','رقم العقد','text'],['rentAmount','مبلغ الإيجار (ر.س)','number']].map(([k,l,t])=>(
-                <div key={k}>
-                  <label style={lbl}>{l}</label>
-                  <input type={t} value={(tf as any)[k]} onChange={e=>setTf(f=>({...f,[k]:e.target.value}))} style={inp}/>
-                </div>
+                <div key={k}><label style={lbl}>{l}</label><input type={t} value={(tf as any)[k]} onChange={e=>setTf(f=>({...f,[k]:e.target.value}))} style={inp}/></div>
               ))}
-              <div>
-                <label style={lbl}>بداية العقد</label>
-                <input type="date" value={tf.contractStart} onChange={e=>handleContractStartChange(e.target.value)} style={inp}/>
-              </div>
-              <div>
-                <label style={lbl}>نهاية العقد <span style={{ fontSize:'10px', color:'#9ca3af' }}>(تلقائي بعد سنة)</span></label>
-                <input type="date" value={tf.contractEnd} onChange={e=>setTf(f=>({...f,contractEnd:e.target.value}))} style={inp}/>
-              </div>
-              <div>
-                <label style={lbl}>دورة الدفع</label>
-                <select value={tf.paymentCycle} onChange={e=>setTf(f=>({...f,paymentCycle:e.target.value}))} style={inp}>
-                  <option value="monthly">شهري</option>
-                  <option value="quarterly">ربع سنوي</option>
-                  <option value="semi">نصف سنوي</option>
-                  <option value="annual">سنوي</option>
-                </select>
-              </div>
-              <div>
-                <label style={lbl}>حالة العقد</label>
-                <select value={tf.status} onChange={e=>setTf(f=>({...f,status:e.target.value}))} style={inp}>
-                  <option value="active">نشط — مستأجر موجود</option>
-                  <option value="expired">منتهي — مستأجر غادر</option>
-                  <option value="terminated">مُنهى مبكراً</option>
-                </select>
-              </div>
-              <div style={{ gridColumn:'1 / -1' }}>
-                <label style={lbl}>ملاحظات</label>
-                <textarea value={tf.notes} onChange={e=>setTf(f=>({...f,notes:e.target.value}))} rows={3} style={{ ...inp, resize:'none' }}/>
-              </div>
+              <div><label style={lbl}>بداية العقد</label><input type="date" value={tf.contractStart} onChange={e=>handleContractStartChange(e.target.value)} style={inp}/></div>
+              <div><label style={lbl}>نهاية العقد <span style={{ fontSize:'10px', color:'#9ca3af' }}>(تلقائي بعد سنة)</span></label><input type="date" value={tf.contractEnd} onChange={e=>setTf(f=>({...f,contractEnd:e.target.value}))} style={inp}/></div>
+              <div><label style={lbl}>دورة الدفع</label><select value={tf.paymentCycle} onChange={e=>setTf(f=>({...f,paymentCycle:e.target.value}))} style={inp}><option value="monthly">شهري</option><option value="quarterly">ربع سنوي</option><option value="semi">نصف سنوي</option><option value="annual">سنوي</option></select></div>
+              <div><label style={lbl}>حالة العقد</label><select value={tf.status} onChange={e=>setTf(f=>({...f,status:e.target.value}))} style={inp}><option value="active">نشط — مستأجر موجود</option><option value="expired">منتهي — مستأجر غادر</option><option value="terminated">مُنهى مبكراً</option></select></div>
+              <div style={{ gridColumn:'1 / -1' }}><label style={lbl}>ملاحظات</label><textarea value={tf.notes} onChange={e=>setTf(f=>({...f,notes:e.target.value}))} rows={3} style={{ ...inp, resize:'none' }}/></div>
             </div>
             <div style={{ display:'flex', gap:'10px', marginTop:'20px' }}>
               <button onClick={saveTenant} disabled={saving} style={{ flex:1, padding:'13px', background:saving?'#9ca3af':'#1B4F72', color:'#fff', border:'none', borderRadius:'12px', cursor:'pointer', fontSize:'15px', fontWeight:'600', fontFamily:'sans-serif' }}>
                 {saving?'جارٍ الحفظ...':editTenant?'حفظ التعديلات':'إضافة المستأجر'}
               </button>
-              <button onClick={() => setShowTenant(false)} style={{ padding:'13px 20px', background:'#f3f4f6', color:'#374151', border:'none', borderRadius:'12px', cursor:'pointer', fontSize:'15px', fontFamily:'sans-serif' }}>
-                إلغاء
-              </button>
+              <button onClick={() => setShowTenant(false)} style={{ padding:'13px 20px', background:'#f3f4f6', color:'#374151', border:'none', borderRadius:'12px', cursor:'pointer', fontSize:'15px', fontFamily:'sans-serif' }}>إلغاء</button>
             </div>
           </div>
         </div>
@@ -947,10 +771,8 @@ export default function MonthlyPage() {
 
       {/* ══ Modal: تسجيل دفعة ══ */}
       {showPay && (
-        <div style={{ position:'fixed', inset:'0', background:'rgba(0,0,0,0.6)', display:'flex', alignItems:'flex-end', justifyContent:'center', zIndex:1000 }}
-          onClick={() => setShowPay(null)}>
-          <div style={{ background:'#fff', borderRadius:'20px 20px 0 0', padding:'24px', width:'100%', maxWidth:'500px', maxHeight:'90vh', overflowY:'auto' }}
-            onClick={e => e.stopPropagation()}>
+        <div style={{ position:'fixed', inset:'0', background:'rgba(0,0,0,0.6)', display:'flex', alignItems:'flex-end', justifyContent:'center', zIndex:1000 }} onClick={() => setShowPay(null)}>
+          <div style={{ background:'#fff', borderRadius:'20px 20px 0 0', padding:'24px', width:'100%', maxWidth:'500px', maxHeight:'90vh', overflowY:'auto' }} onClick={e => e.stopPropagation()}>
             <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:'16px' }}>
               <h2 style={{ margin:0, fontSize:'17px', color:'#1B4F72', fontWeight:'600' }}>تسجيل دفعة — {showPay.tenant.name}</h2>
               <button onClick={() => setShowPay(null)} style={{ border:'none', background:'#f3f4f6', borderRadius:'50%', width:'32px', height:'32px', cursor:'pointer', fontSize:'16px' }}>✕</button>
@@ -962,27 +784,10 @@ export default function MonthlyPage() {
             )}
             <div style={{ display:'flex', flexDirection:'column', gap:'12px' }}>
               <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:'12px' }}>
-                <div>
-                  <label style={lbl}>المبلغ المستحق (ر.س)</label>
-                  <input type="number" value={pf.amountDue||showPay.tenant.rentAmount} onChange={e=>setPf(f=>({...f,amountDue:e.target.value}))} style={inp}/>
-                </div>
-                <div>
-                  <label style={lbl}>المبلغ المدفوع (ر.س)</label>
-                  <input type="number" value={pf.amountPaid} onChange={e=>setPf(f=>({...f,amountPaid:e.target.value}))} placeholder="أدخل المبلغ..." style={inp} autoFocus/>
-                </div>
-                <div>
-                  <label style={lbl}>تاريخ الاستلام</label>
-                  <input type="date" value={pf.paidDate} onChange={e=>setPf(f=>({...f,paidDate:e.target.value}))} style={inp}/>
-                </div>
-                <div>
-                  <label style={lbl}>طريقة الدفع</label>
-                  <select value={pf.paymentMethod} onChange={e=>setPf(f=>({...f,paymentMethod:e.target.value}))} style={inp}>
-                    <option value="transfer">تحويل بنكي</option>
-                    <option value="cash">كاش</option>
-                    <option value="ejar">إيجار</option>
-                    <option value="stc_pay">STC Pay</option>
-                  </select>
-                </div>
+                <div><label style={lbl}>المبلغ المستحق (ر.س)</label><input type="number" value={pf.amountDue||showPay.tenant.rentAmount} onChange={e=>setPf(f=>({...f,amountDue:e.target.value}))} style={inp}/></div>
+                <div><label style={lbl}>المبلغ المدفوع (ر.س)</label><input type="number" value={pf.amountPaid} onChange={e=>setPf(f=>({...f,amountPaid:e.target.value}))} placeholder="أدخل المبلغ..." style={inp} autoFocus/></div>
+                <div><label style={lbl}>تاريخ الاستلام</label><input type="date" value={pf.paidDate} onChange={e=>setPf(f=>({...f,paidDate:e.target.value}))} style={inp}/></div>
+                <div><label style={lbl}>طريقة الدفع</label><select value={pf.paymentMethod} onChange={e=>setPf(f=>({...f,paymentMethod:e.target.value}))} style={inp}><option value="transfer">تحويل بنكي</option><option value="cash">كاش</option><option value="ejar">إيجار</option><option value="stc_pay">STC Pay</option></select></div>
               </div>
               <div>
                 <label style={{ ...lbl, fontWeight:'600' }}>💰 مستلم المبلغ</label>
@@ -996,19 +801,14 @@ export default function MonthlyPage() {
                   ))}
                 </div>
               </div>
-              <div>
-                <label style={lbl}>رقم المرجع</label>
-                <input value={pf.referenceNumber} onChange={e=>setPf(f=>({...f,referenceNumber:e.target.value}))} style={inp}/>
-              </div>
+              <div><label style={lbl}>رقم المرجع</label><input value={pf.referenceNumber} onChange={e=>setPf(f=>({...f,referenceNumber:e.target.value}))} style={inp}/></div>
             </div>
             <div style={{ display:'flex', gap:'10px', marginTop:'20px' }}>
               <button onClick={() => { const a=Number(pf.amountPaid); if(!a)return; savePeriodPayment(showPay.tenant,showPay.period,a,false); }} disabled={saving}
                 style={{ flex:1, padding:'13px', background:saving?'#9ca3af':'#1B4F72', color:'#fff', border:'none', borderRadius:'12px', cursor:'pointer', fontSize:'15px', fontWeight:'600', fontFamily:'sans-serif' }}>
                 {saving?'جارٍ الحفظ...':'✅ تسجيل الدفعة'}
               </button>
-              <button onClick={() => setShowPay(null)} style={{ padding:'13px 20px', background:'#f3f4f6', color:'#374151', border:'none', borderRadius:'12px', cursor:'pointer', fontSize:'15px', fontFamily:'sans-serif' }}>
-                إلغاء
-              </button>
+              <button onClick={() => setShowPay(null)} style={{ padding:'13px 20px', background:'#f3f4f6', color:'#374151', border:'none', borderRadius:'12px', cursor:'pointer', fontSize:'15px', fontFamily:'sans-serif' }}>إلغاء</button>
             </div>
           </div>
         </div>
@@ -1019,21 +819,14 @@ export default function MonthlyPage() {
         <div style={{ position:'fixed', inset:'0', background:'rgba(0,0,0,0.6)', display:'flex', alignItems:'center', justifyContent:'center', zIndex:1000 }}>
           <div style={{ background:'#fff', borderRadius:'16px', padding:'24px', width:'380px', maxWidth:'95vw' }}>
             <h3 style={{ margin:'0 0 8px', color:'#1B4F72' }}>دفع جزئي</h3>
-            <p style={{ color:'#6b7280', fontSize:'13px', marginBottom:'16px' }}>
-              {partialPay.period.label} — المستحق: {partialPay.period.due.toLocaleString('ar-SA')} ر.س
-            </p>
-            <div style={{ marginBottom:'14px' }}>
-              <label style={lbl}>المبلغ المدفوع (ر.س)</label>
-              <input type="number" value={pf.amountPaid} onChange={e=>setPf(f=>({...f,amountPaid:e.target.value}))} placeholder="أقل من المستحق..." style={inp} autoFocus/>
-            </div>
+            <p style={{ color:'#6b7280', fontSize:'13px', marginBottom:'16px' }}>{partialPay.period.label} — المستحق: {partialPay.period.due.toLocaleString('ar-SA')} ر.س</p>
+            <div style={{ marginBottom:'14px' }}><label style={lbl}>المبلغ المدفوع (ر.س)</label><input type="number" value={pf.amountPaid} onChange={e=>setPf(f=>({...f,amountPaid:e.target.value}))} placeholder="أقل من المستحق..." style={inp} autoFocus/></div>
             <div style={{ display:'flex', gap:'8px' }}>
               <button onClick={() => { const a=Number(pf.amountPaid); if(!a||a>=partialPay.period.due){alert('أدخل مبلغاً جزئياً أقل من المستحق');return;} savePeriodPayment(partialPay.tenant,partialPay.period,a,true); }} disabled={saving}
                 style={{ flex:1, padding:'11px', background:'#d97706', color:'#fff', border:'none', borderRadius:'10px', cursor:'pointer', fontSize:'14px', fontWeight:'600', fontFamily:'sans-serif' }}>
                 {saving?'جارٍ...':'تسجيل الدفع الجزئي'}
               </button>
-              <button onClick={() => setPartialPay(null)} style={{ padding:'11px 20px', background:'#f3f4f6', color:'#374151', border:'none', borderRadius:'10px', cursor:'pointer', fontFamily:'sans-serif' }}>
-                إلغاء
-              </button>
+              <button onClick={() => setPartialPay(null)} style={{ padding:'11px 20px', background:'#f3f4f6', color:'#374151', border:'none', borderRadius:'10px', cursor:'pointer', fontFamily:'sans-serif' }}>إلغاء</button>
             </div>
           </div>
         </div>
@@ -1053,9 +846,7 @@ export default function MonthlyPage() {
                 style={{ flex:1, padding:'12px', background:'#16a34a', color:'#fff', border:'none', borderRadius:'10px', cursor:'pointer', fontSize:'14px', fontWeight:'600', fontFamily:'sans-serif' }}>
                 {saving?'جارٍ...':'✅ تأكيد التجديد'}
               </button>
-              <button onClick={() => setRenewConfirm(null)} style={{ padding:'12px 20px', background:'#f3f4f6', color:'#374151', border:'none', borderRadius:'10px', cursor:'pointer', fontFamily:'sans-serif' }}>
-                إلغاء
-              </button>
+              <button onClick={() => setRenewConfirm(null)} style={{ padding:'12px 20px', background:'#f3f4f6', color:'#374151', border:'none', borderRadius:'10px', cursor:'pointer', fontFamily:'sans-serif' }}>إلغاء</button>
             </div>
           </div>
         </div>
@@ -1069,27 +860,21 @@ export default function MonthlyPage() {
             <h3 style={{ margin:'0 0 8px', color:'#dc2626' }}>حذف مستأجر</h3>
             <p style={{ color:'#111827', fontSize:'16px', fontWeight:'600', margin:'0 0 4px' }}>{deleteTenantConfirm.name}</p>
             <p style={{ color:'#6b7280', fontSize:'13px', marginBottom:'8px' }}>شقة {deleteTenantConfirm.unitNumber}</p>
-            <div style={{ background:'#fee2e2', borderRadius:'10px', padding:'10px 14px', marginBottom:'20px', fontSize:'12px', color:'#dc2626' }}>
-              ⚠️ سيتم حذف المستأجر نهائياً وإعادة الشقة لشاغرة
-            </div>
+            <div style={{ background:'#fee2e2', borderRadius:'10px', padding:'10px 14px', marginBottom:'20px', fontSize:'12px', color:'#dc2626' }}>⚠️ سيتم حذف المستأجر نهائياً وإعادة الشقة لشاغرة</div>
             <div style={{ display:'flex', gap:'10px' }}>
               <button onClick={() => deleteTenant(deleteTenantConfirm)} disabled={saving}
                 style={{ flex:1, padding:'12px', background:saving?'#9ca3af':'#dc2626', color:'#fff', border:'none', borderRadius:'10px', cursor:'pointer', fontSize:'14px', fontWeight:'600', fontFamily:'sans-serif' }}>
                 {saving?'جارٍ الحذف...':'تأكيد الحذف'}
               </button>
-              <button onClick={() => setDeleteTenantConfirm(null)} style={{ padding:'12px 20px', background:'#f3f4f6', color:'#374151', border:'none', borderRadius:'10px', cursor:'pointer', fontFamily:'sans-serif' }}>
-                إلغاء
-              </button>
+              <button onClick={() => setDeleteTenantConfirm(null)} style={{ padding:'12px 20px', background:'#f3f4f6', color:'#374151', border:'none', borderRadius:'10px', cursor:'pointer', fontFamily:'sans-serif' }}>إلغاء</button>
             </div>
           </div>
         </div>
       )}
-
     </div>
   );
 }
 
-// ─── Styles ───────────────────────────────────────────────────────────────────
 const lbl: React.CSSProperties = { display:'block', fontSize:'13px', color:'#374151', marginBottom:'6px', fontWeight:'500' };
 const inp: React.CSSProperties = { width:'100%', border:'1.5px solid #e5e7eb', borderRadius:'10px', padding:'10px 12px', fontSize:'14px', boxSizing:'border-box', background:'#fff', fontFamily:'sans-serif' };
 const btn1: React.CSSProperties = { padding:'10px 20px', background:'#1B4F72', color:'#fff', border:'none', borderRadius:'10px', cursor:'pointer', fontSize:'14px', fontFamily:'sans-serif' };
