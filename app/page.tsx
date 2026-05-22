@@ -226,56 +226,6 @@ export default function HomePage() {
                 )}
               </button>
 
-              {/* Panel الإشعارات */}
-              {showNotifs && (
-                <div style={{ position:'absolute', top:'48px', left:'0', width:'320px', maxWidth:'90vw', background:'#fff', borderRadius:'16px', boxShadow:'0 8px 32px rgba(0,0,0,0.18)', border:'1px solid #e5e7eb', zIndex:200, animation:'slideDown 0.2s ease', overflow:'hidden' }}>
-                  <div style={{ padding:'14px 16px', borderBottom:'1px solid #f3f4f6', display:'flex', justifyContent:'space-between', alignItems:'center', background:'#f8fafc' }}>
-                    <span style={{ fontSize:'14px', fontWeight:'700', color:'#1B4F72' }}>الإشعارات</span>
-                    <span style={{ fontSize:'12px', color:'#9ca3af' }}>{notifs.length} إشعار</span>
-                  </div>
-                  <div style={{ maxHeight:'380px', overflowY:'auto' }}>
-                    {notifs.length === 0 ? (
-                      <div style={{ padding:'32px', textAlign:'center' }}>
-                        <div style={{ fontSize:'36px', marginBottom:'8px' }}>🔔</div>
-                        <p style={{ color:'#9ca3af', fontSize:'13px', margin:0 }}>لا توجد إشعارات</p>
-                      </div>
-                    ) : (
-                      notifs.map(n => {
-                        const meta = NOTIF_META[n.type] || { icon:'📌', color:'#374151', bg:'#f3f4f6' };
-                        return (
-                          <div key={n.id} style={{ padding:'12px 16px', borderBottom:'1px solid #f9fafb', display:'flex', gap:'10px', alignItems:'flex-start', background: n.read ? '#fff' : '#f0f9ff' }}>
-                            <div style={{ width:'36px', height:'36px', borderRadius:'10px', background:meta.bg, display:'flex', alignItems:'center', justifyContent:'center', fontSize:'16px', flexShrink:0 }}>
-                              {meta.icon}
-                            </div>
-                            <div style={{ flex:1, minWidth:0 }}>
-                              <div style={{ fontSize:'13px', fontWeight:'600', color:'#111827', marginBottom:'2px' }}>{n.title}</div>
-                              <div style={{ fontSize:'11px', color:'#6b7280', lineHeight:'1.4' }}>{n.body}</div>
-                              <div style={{ fontSize:'10px', color:'#9ca3af', marginTop:'4px', display:'flex', gap:'6px', alignItems:'center' }}>
-                                <span>{n.by}</span>
-                                <span>·</span>
-                                <span>{fmtTime(n.createdAt)}</span>
-                              </div>
-                            </div>
-                            {!n.read && (
-                              <div style={{ width:'8px', height:'8px', borderRadius:'50%', background:'#3b82f6', flexShrink:0, marginTop:'4px' }}/>
-                            )}
-                          </div>
-                        );
-                      })
-                    )}
-                  </div>
-                  {notifs.length > 0 && (
-                    <div style={{ padding:'10px 16px', borderTop:'1px solid #f3f4f6', textAlign:'center', background:'#f8fafc' }}>
-                      <button
-                        onClick={async () => { if(activeProp) { await markAllRead(activeProp.id); setNotifs(p => p.map(n => ({...n,read:true}))); }}}
-                        style={{ fontSize:'12px', color:'#1B4F72', background:'none', border:'none', cursor:'pointer', fontFamily:'sans-serif', fontWeight:'600' }}
-                      >
-                        تعليم الكل كمقروء ✓
-                      </button>
-                    </div>
-                  )}
-                </div>
-              )}
             </div>
 
             {/* زر الخروج */}
@@ -304,6 +254,96 @@ export default function HomePage() {
           <path d="M0,6 C20,12 50,0 100,6 L100,12 L0,12 Z" fill="#F5F7FA"/>
         </svg>
       </div>
+
+      {/* ══ NOTIFICATION PANEL — fixed overlay ══ */}
+      {showNotifs && (
+        <>
+          {/* خلفية شفافة عند الضغط خارج القائمة */}
+          <div
+            onClick={() => setShowNotifs(false)}
+            style={{ position:'fixed', inset:0, zIndex:299, background:'transparent' }}
+          />
+          <div dir="rtl" style={{
+            position: 'fixed',
+            top: '0',
+            left: '0',
+            right: '0',
+            zIndex: 300,
+            background: '#fff',
+            borderRadius: '0 0 20px 20px',
+            boxShadow: '0 8px 32px rgba(0,0,0,0.2)',
+            overflow: 'hidden',
+            animation: 'slideDown 0.2s ease',
+            maxHeight: '80vh',
+            display: 'flex',
+            flexDirection: 'column',
+          }}>
+            {/* هيدر القائمة */}
+            <div style={{ padding:'16px 20px', background:'linear-gradient(135deg,#1B4F72,#2980B9)', display:'flex', justifyContent:'space-between', alignItems:'center' }}>
+              <span style={{ fontSize:'15px', fontWeight:'700', color:'#fff' }}>🔔 الإشعارات</span>
+              <div style={{ display:'flex', alignItems:'center', gap:'12px' }}>
+                <span style={{ fontSize:'12px', color:'rgba(255,255,255,0.6)' }}>{notifs.length} إشعار</span>
+                <button
+                  onClick={() => setShowNotifs(false)}
+                  style={{ background:'rgba(255,255,255,0.15)', border:'none', borderRadius:'8px', padding:'5px 10px', cursor:'pointer', color:'#fff', fontSize:'14px', fontFamily:'sans-serif' }}
+                >
+                  ✕
+                </button>
+              </div>
+            </div>
+
+            {/* قائمة الإشعارات */}
+            <div style={{ overflowY:'auto', flex:1 }}>
+              {notifs.length === 0 ? (
+                <div style={{ padding:'40px', textAlign:'center' }}>
+                  <div style={{ fontSize:'40px', marginBottom:'10px' }}>🔔</div>
+                  <p style={{ color:'#9ca3af', fontSize:'14px', margin:0 }}>لا توجد إشعارات</p>
+                </div>
+              ) : (
+                notifs.map(n => {
+                  const meta = NOTIF_META[n.type] || { icon:'📌', color:'#374151', bg:'#f3f4f6' };
+                  return (
+                    <div key={n.id} style={{ padding:'14px 20px', borderBottom:'1px solid #f3f4f6', display:'flex', gap:'12px', alignItems:'flex-start', background: n.read ? '#fff' : '#f0f9ff' }}>
+                      <div style={{ width:'40px', height:'40px', borderRadius:'12px', background:meta.bg, display:'flex', alignItems:'center', justifyContent:'center', fontSize:'18px', flexShrink:0 }}>
+                        {meta.icon}
+                      </div>
+                      <div style={{ flex:1, minWidth:0 }}>
+                        <div style={{ fontSize:'14px', fontWeight:'600', color:'#111827', marginBottom:'3px' }}>{n.title}</div>
+                        <div style={{ fontSize:'12px', color:'#6b7280', lineHeight:'1.5' }}>{n.body}</div>
+                        <div style={{ fontSize:'11px', color:'#9ca3af', marginTop:'5px', display:'flex', gap:'6px', alignItems:'center' }}>
+                          <span style={{ background:'#f3f4f6', padding:'1px 8px', borderRadius:'6px' }}>{n.by}</span>
+                          <span>·</span>
+                          <span>{fmtTime(n.createdAt)}</span>
+                        </div>
+                      </div>
+                      {!n.read && (
+                        <div style={{ width:'9px', height:'9px', borderRadius:'50%', background:'#3b82f6', flexShrink:0, marginTop:'5px' }}/>
+                      )}
+                    </div>
+                  );
+                })
+              )}
+            </div>
+
+            {/* زر تعليم الكل */}
+            {notifs.length > 0 && (
+              <div style={{ padding:'12px 20px', borderTop:'1px solid #f3f4f6', background:'#f8fafc', display:'flex', justifyContent:'center' }}>
+                <button
+                  onClick={async () => {
+                    if (activeProp) {
+                      await markAllRead(activeProp.id);
+                      setNotifs(p => p.map(n => ({ ...n, read:true })));
+                    }
+                  }}
+                  style={{ fontSize:'13px', color:'#1B4F72', background:'#dbeafe', border:'none', borderRadius:'8px', padding:'8px 20px', cursor:'pointer', fontFamily:'sans-serif', fontWeight:'600' }}
+                >
+                  تعليم الكل كمقروء ✓
+                </button>
+              </div>
+            )}
+          </div>
+        </>
+      )}
 
       {/* ══ STATS ══ */}
       <div style={{ display:'grid', gridTemplateColumns:'repeat(3,1fr)', gap:'10px', padding:'0 16px', marginTop:'-36px', marginBottom:'24px', position:'relative', zIndex:10 }}>
