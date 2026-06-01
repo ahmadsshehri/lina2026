@@ -1,5 +1,6 @@
 import type { Metadata } from 'next';
 import { Toaster } from 'react-hot-toast';
+import Providers from './Providers';
 import './globals.css';
 
 export const metadata: Metadata = {
@@ -20,8 +21,10 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         <meta name="apple-mobile-web-app-title" content="كِراءَك" />
       </head>
       <body>
-        {children}
-        <Toaster position="top-center" toastOptions={{ duration: 3000 }}/>
+        <Providers>
+          {children}
+          <Toaster position="top-center" toastOptions={{ duration: 3000 }}/>
+        </Providers>
       </body>
     </html>
   );

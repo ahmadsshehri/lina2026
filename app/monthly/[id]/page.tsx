@@ -1,13 +1,13 @@
 'use client';
 import { useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
-import { onAuthStateChanged } from 'firebase/auth';
-import { auth, db } from '../../../lib/firebase';
+import { db } from '../../../lib/firebase';
 import {
   doc, getDoc, getDocs, updateDoc, addDoc, deleteDoc,
   collection, query, where, serverTimestamp, Timestamp
 } from 'firebase/firestore';
-import { getCurrentUser, AppUserBasic } from '../../../lib/userHelpers';
+import { AppUserBasic } from '../../../lib/userHelpers';
+import { useAuth } from '../../../context/AuthContext';
 
 interface Tenant {
   id: string; propertyId: string; unitId: string; unitNumber: string;
@@ -41,6 +41,7 @@ function monthLabel(d: Date) {
 export default function TenantDetailPage() {
   const params = useParams();
   const router = useRouter();
+  const { appUser: authUser, loading: authLoading } = useAuth();
   const tenantId = params.id as string;
 
   const [appUser, setAppUser] = useState<AppUserBasic | null>(null);
@@ -69,16 +70,11 @@ export default function TenantDetailPage() {
   const canEdit   = appUser?.role === 'owner' || appUser?.role === 'manager';
 
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, async (fbUser) => {
-      if (!fbUser) { router.push('/login'); return; }
-      const user = await getCurrentUser(fbUser.uid);
-      if (!user) { router.push('/login'); return; }
-      setAppUser(user);
-      await loadTenant();
-      setLoading(false);
-    });
-    return unsub;
-  }, [tenantId]);
+    if (authLoading) return;
+    if (!authUser) { router.push('/login'); return; }
+    setAppUser(authUser as AppUserBasic);
+    loadTenant().then(() => setLoading(false));
+  }, [authLoading, authUser?.uid, tenantId]);
 
   const loadTenant = async () => {
     const tSnap = await getDoc(doc(db, 'tenants', tenantId));
@@ -126,7 +122,7 @@ export default function TenantDetailPage() {
         paymentMethod: pf.paymentMethod, referenceNumber: pf.referenceNumber,
         receivedBy: pf.receivedBy,
         paidDate: pf.paidDate ? Timestamp.fromDate(new Date(pf.paidDate)) : Timestamp.now(),
-        recordedBy: auth.currentUser?.uid,
+        recordedBy: authUser?.uid,
       };
       if (editPayment) {
         await updateDoc(doc(db,'rentPayments',editPayment.id), data);

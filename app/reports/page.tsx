@@ -1,10 +1,10 @@
 'use client';
 import { useEffect, useState, useMemo } from 'react';
-import { onAuthStateChanged } from 'firebase/auth';
-import { auth, db } from '../../lib/firebase';
+import { db } from '../../lib/firebase';
 import { collection, getDocs, query, where } from 'firebase/firestore';
 import { useRouter } from 'next/navigation';
-import { getCurrentUser, loadPropertiesForUser, AppUserBasic, PropertyBasic } from '../../lib/userHelpers';
+import { AppUserBasic, PropertyBasic } from '../../lib/userHelpers';
+import { useAuth } from '../../context/AuthContext';
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend,
   ResponsiveContainer, LineChart, Line, PieChart, Pie, Cell,
@@ -42,6 +42,8 @@ function daysInMonth(y: number, m: number) { return new Date(y, m, 0).getDate();
 // ─── Component ────────────────────────────────────────────────────────────────
 export default function ReportsPage() {
   const router = useRouter();
+  const { appUser: authUser, properties: authProps, activeProperty, loading: authLoading } = useAuth();
+
   const [appUser,    setAppUser]    = useState<AppUserBasic | null>(null);
   const [properties, setProperties] = useState<PropertyBasic[]>([]);
   const [propId,     setPropId]     = useState('');
@@ -60,25 +62,16 @@ export default function ReportsPage() {
 
   // ─── Auth ──────────────────────────────────────────────────────────────────
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, async (fbUser) => {
-      if (!fbUser) { router.push('/login'); return; }
-      const user = await getCurrentUser(fbUser.uid);
-      if (!user)  { router.push('/login'); return; }
-      setAppUser(user);
-      const props = await loadPropertiesForUser(fbUser.uid, user.role);
-      setProperties(props);
-    if (props.length > 0) {
-  const savedId = localStorage.getItem('selectedPropertyId');
-  const saved = props.find(p => p.id === savedId);
-  const selected = saved || props[0];
-  setPropId(selected.id);
-  setPropName(selected.name);
-  await loadAllData(selected.id, String(currentYear));
-}
-      setLoading(false);
-    });
-    return unsub;
-  }, []);
+    if (authLoading) return;
+    if (!authUser) { router.push('/login'); return; }
+    if (!activeProperty) { setLoading(false); return; }
+
+    setAppUser(authUser as AppUserBasic);
+    setProperties(authProps);
+    setPropId(activeProperty.id);
+    setPropName(activeProperty.name);
+    loadAllData(activeProperty.id, String(currentYear)).then(() => setLoading(false));
+  }, [authLoading, authUser?.uid, activeProperty?.id]);
 
   const loadAllData = async (pid: string, year: string) => {
     setDataLoading(true);

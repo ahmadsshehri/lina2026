@@ -1,10 +1,10 @@
 'use client';
 import { useEffect, useState } from 'react';
-import { onAuthStateChanged } from 'firebase/auth';
-import { auth, db } from '../../lib/firebase';
+import { db } from '../../lib/firebase';
 import { doc, getDoc, setDoc, serverTimestamp } from 'firebase/firestore';
 import { useRouter } from 'next/navigation';
-import { getCurrentUser, AppUserBasic } from '../../lib/userHelpers';
+import { AppUserBasic } from '../../lib/userHelpers';
+import { useAuth } from '../../context/AuthContext';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 interface MenuItem {
@@ -35,6 +35,8 @@ const ICONS = ['📋','🏨','💳','📅','📊','💰','🏢','👥','🔑','�
 // ─── Component ────────────────────────────────────────────────────────────────
 export default function OwnerDashboardSettings() {
   const router = useRouter();
+  const { appUser: authUser, loading: authLoading } = useAuth();
+
   const [appUser,        setAppUser]        = useState<AppUserBasic | null>(null);
   const [menu,           setMenu]           = useState<MenuItem[]>(DEFAULT_MENU);
   const [loading,        setLoading]        = useState(true);
@@ -48,33 +50,23 @@ export default function OwnerDashboardSettings() {
 
   // ─── Load settings from Firestore on mount ────────────────────────────────
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, async (fbUser) => {
-      if (!fbUser) { router.push('/login'); return; }
+    if (authLoading) return;
+    if (!authUser) { router.push('/login'); return; }
+    if (authUser.role !== 'owner') { router.push('/'); return; }
 
-      const user = await getCurrentUser(fbUser.uid);
-      if (!user || user.role !== 'owner') { router.push('/'); return; }
-      setAppUser(user);
+    setAppUser(authUser as AppUserBasic);
 
+    (async () => {
       try {
-        // ✅ جلب الإعدادات المحفوظة من Firestore
         const snap = await getDoc(doc(db, 'settings', 'dashboard'));
         if (snap.exists()) {
           const savedMenu = snap.data().menu as { id:string; label:string; icon:string; visible:boolean; order?:number }[];
-
-          // دمج المحفوظ مع الافتراضي مع الحفاظ على الترتيب المحفوظ
           const savedMap = new Map(savedMenu.map(s => [s.id, s]));
-          const merged: MenuItem[] = [];
-
-          // أولاً: العناصر التي لها ترتيب محفوظ (مرتبة)
           const orderedSaved = savedMenu
             .map(s => DEFAULT_MENU.find(d => d.id === s.id))
             .filter(Boolean) as MenuItem[];
-
-          // ثانياً: أي عناصر جديدة في الافتراضي غير موجودة في المحفوظ
           const savedIds = new Set(savedMenu.map(s => s.id));
           const newItems = DEFAULT_MENU.filter(d => !savedIds.has(d.id));
-
-          // دمج مع تطبيق قيم label/icon/visible المحفوظة
           const finalMenu = [...orderedSaved, ...newItems].map(item => {
             const saved = savedMap.get(item.id);
             if (saved) {
@@ -87,19 +79,14 @@ export default function OwnerDashboardSettings() {
             }
             return item;
           });
-
           setMenu(finalMenu);
         }
-        // إذا لا يوجد document محفوظ → استخدم الافتراضي (setMenu لم يتغير)
       } catch (e) {
         console.error('Error loading dashboard settings:', e);
-        // في حالة الخطأ → استمر بالافتراضي
       }
-
       setLoading(false);
-    });
-    return unsub;
-  }, []);
+    })();
+  }, [authLoading, authUser?.uid]);
 
   // ─── Save to Firestore ────────────────────────────────────────────────────
   const saveSettings = async () => {
@@ -115,7 +102,7 @@ export default function OwnerDashboardSettings() {
           order:   index,        // ✅ حفظ الترتيب صراحةً
         })),
         updatedAt: serverTimestamp(),
-        updatedBy: auth.currentUser?.uid,
+        updatedBy: authUser?.uid,
       });
       setSaveStatus('saved');
       setTimeout(() => setSaveStatus('idle'), 3000);

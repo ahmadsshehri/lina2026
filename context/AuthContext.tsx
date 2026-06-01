@@ -9,23 +9,36 @@ import {
 import { auth } from '../lib/firebase';
 import { getUserDoc } from '../lib/db';
 import { useStore } from '../store/useStore';
+import { loadPropertiesForUser, PropertyBasic } from '../lib/userHelpers';
 import type { AppUser } from '../types';
 
 interface AuthContextType {
-  firebaseUser: User | null;
-  appUser:      AppUser | null;
-  loading:      boolean;
-  login:        (email: string, password: string) => Promise<void>;
-  logout:       () => Promise<void>;
+  firebaseUser:      User | null;
+  appUser:           AppUser | null;
+  properties:        PropertyBasic[];
+  activeProperty:    PropertyBasic | null;
+  setActiveProperty: (p: PropertyBasic) => void;
+  loading:           boolean;
+  login:             (email: string, password: string) => Promise<void>;
+  logout:            () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextType>({} as AuthContextType);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [firebaseUser, setFirebaseUser] = useState<User | null>(null);
-  const [appUser,      setAppUser]      = useState<AppUser | null>(null);
-  const [loading,      setLoading]      = useState(true);
+  const [firebaseUser,   setFirebaseUser]   = useState<User | null>(null);
+  const [appUser,        setAppUser]        = useState<AppUser | null>(null);
+  const [properties,     setProperties]     = useState<PropertyBasic[]>([]);
+  const [activeProperty, setActivePropertyState] = useState<PropertyBasic | null>(null);
+  const [loading,        setLoading]        = useState(true);
   const setStoreUser = useStore(s => s.setUser);
+
+  const setActiveProperty = (p: PropertyBasic) => {
+    setActivePropertyState(p);
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('selectedPropertyId', p.id);
+    }
+  };
 
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, async (fbUser) => {
@@ -35,12 +48,31 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           const userData = await getUserDoc(fbUser.uid);
           setAppUser(userData);
           setStoreUser(userData);
+
+          if (userData) {
+            const props = await loadPropertiesForUser(fbUser.uid, userData.role);
+            setProperties(props);
+
+            if (props.length > 0) {
+              const savedId = typeof window !== 'undefined'
+                ? localStorage.getItem('selectedPropertyId')
+                : null;
+              const saved = props.find(p => p.id === savedId);
+              const selected = saved || props[0];
+              setActivePropertyState(selected);
+              if (typeof window !== 'undefined') {
+                localStorage.setItem('selectedPropertyId', selected.id);
+              }
+            }
+          }
         } catch (e) {
-          console.error('Error fetching user doc:', e);
+          console.error('AuthContext error:', e);
         }
       } else {
         setAppUser(null);
         setStoreUser(null);
+        setProperties([]);
+        setActivePropertyState(null);
       }
       setLoading(false);
     });
@@ -48,8 +80,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const login = async (email: string, password: string) => {
-    const result = await signInWithEmailAndPassword(auth, email.trim(), password);
-    console.log('Login success:', result.user.uid);
+    await signInWithEmailAndPassword(auth, email.trim(), password);
   };
 
   const logout = async () => {
@@ -57,7 +88,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   return (
-    <AuthContext.Provider value={{ firebaseUser, appUser, loading, login, logout }}>
+    <AuthContext.Provider value={{
+      firebaseUser, appUser, properties, activeProperty,
+      setActiveProperty, loading, login, logout,
+    }}>
       {children}
     </AuthContext.Provider>
   );

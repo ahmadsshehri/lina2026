@@ -1,10 +1,10 @@
 'use client';
 import { useEffect, useState } from 'react';
-import { onAuthStateChanged } from 'firebase/auth';
-import { auth, db } from '../../lib/firebase';
-import { collection, getDocs, query, where, doc } from 'firebase/firestore';
+import { db } from '../../lib/firebase';
+import { collection, getDocs, query, where } from 'firebase/firestore';
 import { useRouter } from 'next/navigation';
-import { getCurrentUser, loadPropertiesForUser, AppUserBasic, PropertyBasic } from '../../lib/userHelpers';
+import { AppUserBasic, PropertyBasic } from '../../lib/userHelpers';
+import { useAuth } from '../../context/AuthContext';
 
 interface Unit { id: string; unitNumber: string; }
 interface Booking {
@@ -72,6 +72,8 @@ function isCheckoutDay(bookings: Booking[], unitId: string, year: number, month:
 
 export default function CalendarPage() {
   const router = useRouter();
+  const { appUser: authUser, properties: authProps, activeProperty, loading: authLoading } = useAuth();
+
   const [appUser, setAppUser] = useState<AppUserBasic | null>(null);
   const [properties, setProperties] = useState<PropertyBasic[]>([]);
   const [propId, setPropId] = useState('');
@@ -85,24 +87,15 @@ export default function CalendarPage() {
   const [selected, setSelected] = useState<Booking | null>(null);
 
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, async (fbUser) => {
-      if (!fbUser) { router.push('/login'); return; }
-      const user = await getCurrentUser(fbUser.uid);
-      if (!user) { router.push('/login'); return; }
-      setAppUser(user);
-      const props = await loadPropertiesForUser(fbUser.uid, user.role);
-      setProperties(props);
-   if (props.length > 0) {
-  const savedId = localStorage.getItem('selectedPropertyId');
-  const saved = props.find(p => p.id === savedId);
-  const selected = saved || props[0];
-  setPropId(selected.id);
-  await loadData(selected.id);
-}
-      setLoading(false);
-    });
-    return unsub;
-  }, []);
+    if (authLoading) return;
+    if (!authUser) { router.push('/login'); return; }
+    if (!activeProperty) { setLoading(false); return; }
+
+    setAppUser(authUser as AppUserBasic);
+    setProperties(authProps);
+    setPropId(activeProperty.id);
+    loadData(activeProperty.id).then(() => setLoading(false));
+  }, [authLoading, authUser?.uid, activeProperty?.id]);
 
   const loadData = async (pid: string) => {
     const [uSnap, bSnap] = await Promise.all([

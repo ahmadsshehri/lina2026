@@ -1,14 +1,14 @@
 'use client';
 import { useEffect, useState, useMemo } from 'react';
-import { onAuthStateChanged } from 'firebase/auth';
-import { auth, db } from '../../lib/firebase';
+import { db } from '../../lib/firebase';
 import {
   collection, getDocs, addDoc, updateDoc, deleteDoc,
   doc, query, where, serverTimestamp, Timestamp
 } from 'firebase/firestore';
 import { useRouter } from 'next/navigation';
-import { getCurrentUser, loadPropertiesForUser, AppUserBasic, PropertyBasic } from '../../lib/userHelpers';
+import { AppUserBasic, PropertyBasic } from '../../lib/userHelpers';
 import { notify } from '../../lib/notifications';
+import { useAuth } from '../../context/AuthContext';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 interface Unit {
@@ -119,6 +119,8 @@ const EMPTY_TF = {
 // ─── Component ────────────────────────────────────────────────────────────────
 export default function MonthlyPage() {
   const router = useRouter();
+  const { appUser: authUser, properties: authProps, activeProperty, loading: authLoading } = useAuth();
+
   const [appUser,    setAppUser]    = useState<AppUserBasic | null>(null);
   const [properties, setProperties] = useState<PropertyBasic[]>([]);
   const [propId,     setPropId]     = useState('');
@@ -153,26 +155,17 @@ export default function MonthlyPage() {
   });
 
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, async (fbUser) => {
-      if (!fbUser) { router.push('/login'); return; }
-      const user = await getCurrentUser(fbUser.uid);
-      if (!user)  { router.push('/login'); return; }
-      setAppUser(user);
-      setPf(f => ({ ...f, receivedBy: user.role === 'owner' ? 'owner' : 'manager' }));
-      const props = await loadPropertiesForUser(fbUser.uid, user.role);
-      setProperties(props);
-      if (props.length > 0) {
-        const savedId = localStorage.getItem('selectedPropertyId');
-        const saved = props.find(p => p.id === savedId);
-        const selected = saved || props[0];
-        setPropId(selected.id);
-        setPropName(selected.name);
-        await loadData(selected.id);
-      }
-      setLoading(false);
-    });
-    return unsub;
-  }, []);
+    if (authLoading) return;
+    if (!authUser) { router.push('/login'); return; }
+    if (!activeProperty) { setLoading(false); return; }
+
+    setAppUser(authUser as AppUserBasic);
+    setPf(f => ({ ...f, receivedBy: authUser.role === 'owner' ? 'owner' : 'manager' }));
+    setProperties(authProps);
+    setPropId(activeProperty.id);
+    setPropName(activeProperty.name);
+    loadData(activeProperty.id).then(() => setLoading(false));
+  }, [authLoading, authUser?.uid, activeProperty?.id]);
 
   const loadData = async (pid: string) => {
     const [uSnap, ts, ps] = await Promise.all([
@@ -364,7 +357,7 @@ export default function MonthlyPage() {
         propertyId: propId, tenantId: tenant.id,
         unitId: tenant.unitId, unitNumber: tenant.unitNumber, tenantName: tenant.name,
         paymentMethod: pf.paymentMethod, referenceNumber: pf.referenceNumber,
-        receivedBy: pf.receivedBy, recordedBy: auth.currentUser?.uid,
+        receivedBy: pf.receivedBy, recordedBy: authUser?.uid,
         paidDate: pf.paidDate ? Timestamp.fromDate(new Date(pf.paidDate)) : Timestamp.now(),
       };
       if (isPartial) {

@@ -1,11 +1,11 @@
 'use client';
 import { useEffect, useState, useRef } from 'react';
-import { onAuthStateChanged } from 'firebase/auth';
 import { auth, db } from '../lib/firebase';
 import { collection, getDocs, query, where } from 'firebase/firestore';
 import { useRouter } from 'next/navigation';
-import { getCurrentUser, loadPropertiesForUser, AppUserBasic, PropertyBasic } from '../lib/userHelpers';
+import { AppUserBasic, PropertyBasic } from '../lib/userHelpers';
 import { loadNotifications, markAllRead, NotifDoc, NOTIF_META } from '../lib/notifications';
+import { useAuth } from '../context/AuthContext';
 
 const ROLE_LABEL: Record<string, string> = {
   owner:       'مالك العقار',
@@ -70,6 +70,9 @@ function fmtTime(ts: any): string {
 
 export default function HomePage() {
   const router = useRouter();
+  const { appUser: authUser, properties: authProps, activeProperty: authActiveProp,
+          setActiveProperty: setAuthActiveProp, loading: authLoading } = useAuth();
+
   const [loading,        setLoading]        = useState(true);
   const [appUser,        setAppUser]        = useState<AppUserBasic | null>(null);
   const [properties,     setProperties]     = useState<PropertyBasic[]>([]);
@@ -86,30 +89,21 @@ export default function HomePage() {
   const unreadCount = notifs.filter(n => !n.read).length;
 
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, async (fbUser) => {
-      if (!fbUser) { router.push('/login'); return; }
-      try {
-        const user = await getCurrentUser(fbUser.uid);
-        if (!user) { setError('لم يتم العثور على بيانات المستخدم.'); setLoading(false); return; }
-        setAppUser(user);
-        const props = await loadPropertiesForUser(fbUser.uid, user.role);
-        setProperties(props);
-        if (props.length > 0) {
-          const savedId  = localStorage.getItem('selectedPropertyId');
-          const saved    = props.find(p => p.id === savedId);
-          const selected = saved || props[0];
-          setActiveProp(selected);
-          localStorage.setItem('selectedPropertyId', selected.id);
-          await Promise.all([
-            loadStats(selected.id),
-            loadNotifs(selected.id),
-          ]);
-        }
-      } catch (err: any) { setError('حدث خطأ: ' + err.message); }
-      setLoading(false);
-    });
-    return unsub;
-  }, []);
+    if (authLoading) return;
+    if (!authUser) { router.push('/login'); return; }
+    if (!authActiveProp) { setLoading(false); return; }
+
+    setAppUser(authUser as AppUserBasic);
+    setProperties(authProps);
+    setActiveProp(authActiveProp);
+
+    Promise.all([
+      loadStats(authActiveProp.id),
+      loadNotifs(authActiveProp.id),
+    ])
+      .catch((err: any) => setError('حدث خطأ: ' + err.message))
+      .finally(() => setLoading(false));
+  }, [authLoading, authUser?.uid, authActiveProp?.id]);
 
   // إغلاق panel الإشعارات عند الضغط خارجه
   useEffect(() => {
@@ -154,8 +148,8 @@ export default function HomePage() {
 
   const switchProperty = async (prop: PropertyBasic) => {
     setActiveProp(prop);
+    setAuthActiveProp(prop);
     setShowPropPicker(false);
-    localStorage.setItem('selectedPropertyId', prop.id);
     await Promise.all([loadStats(prop.id), loadNotifs(prop.id)]);
   };
 

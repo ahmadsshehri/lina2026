@@ -1,14 +1,14 @@
 'use client';
 import { useEffect, useState, useMemo } from 'react';
-import { onAuthStateChanged } from 'firebase/auth';
-import { auth, db } from '../../lib/firebase';
+import { db } from '../../lib/firebase';
 import {
   collection, getDocs, addDoc, updateDoc, deleteDoc,
   doc, query, where, serverTimestamp, Timestamp,
 } from 'firebase/firestore';
 import { useRouter } from 'next/navigation';
-import { getCurrentUser, loadPropertiesForUser, AppUserBasic, PropertyBasic } from '../../lib/userHelpers';
+import { AppUserBasic, PropertyBasic } from '../../lib/userHelpers';
 import { notify } from '../../lib/notifications';
+import { useAuth } from '../../context/AuthContext';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 interface Unit { id: string; unitNumber: string; type: string; }
@@ -83,6 +83,8 @@ function daysUntilCheckin(ts: any): number {
 // ─── Component ────────────────────────────────────────────────────────────────
 export default function FurnishedPage() {
   const router = useRouter();
+  const { appUser: authUser, properties: authProps, activeProperty, loading: authLoading } = useAuth();
+
   const [appUser,    setAppUser]    = useState<AppUserBasic | null>(null);
   const [properties, setProperties] = useState<PropertyBasic[]>([]);
   const [propId,     setPropId]     = useState('');
@@ -119,26 +121,17 @@ export default function FurnishedPage() {
 
   // ─── Auth & Load ──────────────────────────────────────────────────────────
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, async (fbUser) => {
-      if (!fbUser) { router.push('/login'); return; }
-      const user = await getCurrentUser(fbUser.uid);
-      if (!user)  { router.push('/login'); return; }
-      setAppUser(user);
-      setForm(f => ({ ...f, receivedBy: user.role === 'owner' ? 'owner' : 'manager' }));
-      const props = await loadPropertiesForUser(fbUser.uid, user.role);
-      setProperties(props);
-      if (props.length > 0) {
-        const savedId = localStorage.getItem('selectedPropertyId');
-        const saved = props.find(p => p.id === savedId);
-        const selected = saved || props[0];
-        setPropId(selected.id);
-        setPropName(selected.name);
-        await loadData(selected.id);
-      }
-      setLoading(false);
-    });
-    return unsub;
-  }, []);
+    if (authLoading) return;
+    if (!authUser) { router.push('/login'); return; }
+    if (!activeProperty) { setLoading(false); return; }
+
+    setAppUser(authUser as AppUserBasic);
+    setForm(f => ({ ...f, receivedBy: authUser.role === 'owner' ? 'owner' : 'manager' }));
+    setProperties(authProps);
+    setPropId(activeProperty.id);
+    setPropName(activeProperty.name);
+    loadData(activeProperty.id).then(() => setLoading(false));
+  }, [authLoading, authUser?.uid, activeProperty?.id]);
 
   const loadData = async (pid: string) => {
     const [uSnap, bSnap] = await Promise.all([
@@ -289,7 +282,7 @@ export default function FurnishedPage() {
     try {
       await addDoc(collection(db,'deleteRequests'), {
         type:'booking', documentId:deleteTarget.id, propertyId:propId,
-        requestedBy: auth.currentUser?.uid, requestedByName:appUser?.name,
+        requestedBy: authUser?.uid, requestedByName:appUser?.name,
         requestedByRole:appUser?.role, reason:deleteReason, status:'pending',
         bookingDetails:{
           guestName:deleteTarget.guestName, unitNumber:deleteTarget.unitNumber,
@@ -313,7 +306,7 @@ export default function FurnishedPage() {
     setSaving(true);
     try {
       await updateDoc(doc(db,'bookings',depositConfirm.booking.id), {
-        depositStatus:depositConfirm.action, depositActionDate:serverTimestamp(), depositActionBy:auth.currentUser?.uid,
+        depositStatus:depositConfirm.action, depositActionDate:serverTimestamp(), depositActionBy:authUser?.uid,
       });
       await loadData(propId);
       setDepositConfirm(null);
