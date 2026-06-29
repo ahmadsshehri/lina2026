@@ -1,14 +1,14 @@
 'use client';
 import { useEffect, useState } from 'react';
-import { onAuthStateChanged } from 'firebase/auth';
-import { auth, db } from '../../lib/firebase';
+import { db } from '../../lib/firebase';
 import {
   collection, getDocs, addDoc, updateDoc, deleteDoc,
   doc, query, where, serverTimestamp, Timestamp,
 } from 'firebase/firestore';
 import { useRouter } from 'next/navigation';
-import { getCurrentUser, loadPropertiesForUser, AppUserBasic, PropertyBasic } from '../../lib/userHelpers';
+import { AppUserBasic, PropertyBasic } from '../../lib/userHelpers';
 import { notify } from '../../lib/notifications';
+import { useAuth } from '../../context/AuthContext';
 
 interface OtherRevenue {
   id: string; propertyId: string; amount: number;
@@ -41,6 +41,8 @@ const REASONS = ['إيراد إيجار متأخر','غرامة تأخير','ع�
 
 export default function OtherRevenuePage() {
   const router = useRouter();
+  const { appUser: authUser, properties: authProps, activeProperty, loading: authLoading } = useAuth();
+
   const [appUser,    setAppUser]    = useState<AppUserBasic | null>(null);
   const [properties, setProperties] = useState<PropertyBasic[]>([]);
   const [propId,     setPropId]     = useState('');
@@ -58,25 +60,16 @@ export default function OtherRevenuePage() {
   const canDelete = appUser?.role === 'owner';
 
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, async (fbUser) => {
-      if (!fbUser) { router.push('/login'); return; }
-      const user = await getCurrentUser(fbUser.uid);
-      if (!user)  { router.push('/login'); return; }
-      setAppUser(user);
-      const props = await loadPropertiesForUser(fbUser.uid, user.role);
-      setProperties(props);
-      if (props.length > 0) {
-        const savedId = localStorage.getItem('selectedPropertyId');
-        const saved = props.find(p => p.id === savedId);
-        const selected = saved || props[0];
-        setPropId(selected.id);
-        setPropName(selected.name);
-        await loadData(selected.id);
-      }
-      setLoading(false);
-    });
-    return unsub;
-  }, []);
+    if (authLoading) return;
+    if (!authUser) { router.push('/login'); return; }
+    if (!activeProperty) { setLoading(false); return; }
+
+    setAppUser(authUser as AppUserBasic);
+    setProperties(authProps);
+    setPropId(activeProperty.id);
+    setPropName(activeProperty.name);
+    loadData(activeProperty.id).then(() => setLoading(false));
+  }, [authLoading, authUser?.uid, activeProperty?.id]);
 
   const loadData = async (pid: string) => {
     const snap = await getDocs(query(collection(db,'otherRevenue'), where('propertyId','==',pid)));

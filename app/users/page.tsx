@@ -1,15 +1,15 @@
 'use client';
 import { useEffect, useState } from 'react';
-import { onAuthStateChanged } from 'firebase/auth';
 import { createUserWithEmailAndPassword, initializeAuth } from 'firebase/auth';
 import { initializeApp, getApps } from 'firebase/app';
-import { auth, db } from '../../lib/firebase';
+import { db } from '../../lib/firebase';
 import {
   collection, getDocs, setDoc, updateDoc,
   doc, query, where, serverTimestamp, getDoc
 } from 'firebase/firestore';
 import { useRouter } from 'next/navigation';
-import { getCurrentUser, loadPropertiesForUser, AppUserBasic, PropertyBasic } from '../../lib/userHelpers';
+import { AppUserBasic, PropertyBasic } from '../../lib/userHelpers';
+import { useAuth } from '../../context/AuthContext';
 
 const ROLES = {
   manager:     { label: 'مدير عقار', color: '#1e40af', bg: '#dbeafe', desc: 'إضافة وتعديل — بدون حذف' },
@@ -24,6 +24,8 @@ interface UserDoc {
 
 export default function UsersPage() {
   const router = useRouter();
+  const { appUser: authUser, properties: authProps, loading: authLoading } = useAuth();
+
   const [appUser, setAppUser] = useState<AppUserBasic | null>(null);
   const [users, setUsers] = useState<UserDoc[]>([]);
   const [properties, setProperties] = useState<PropertyBasic[]>([]);
@@ -38,29 +40,17 @@ export default function UsersPage() {
   });
 
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, async (fbUser) => {
-      if (!fbUser) { router.push('/login'); return; }
+    if (authLoading) return;
+    if (!authUser) { router.push('/login'); return; }
+    if (authUser.role !== 'owner') { router.push('/'); return; }
 
-      const user = await getCurrentUser(fbUser.uid);
+    setAppUser(authUser as AppUserBasic);
+    setProperties(authProps);
 
-      // هذه الصفحة للمالك فقط
-      if (!user || user.role !== 'owner') {
-        router.push('/');
-        return;
-      }
-      setAppUser(user);
-
-      const [usersSnap, props] = await Promise.all([
-        getDocs(collection(db, 'users')),
-        loadPropertiesForUser(fbUser.uid, 'owner'),
-      ]);
-
-      setUsers(usersSnap.docs.map(d => ({ uid: d.id, ...d.data() } as UserDoc)));
-      setProperties(props);
-      setLoading(false);
-    });
-    return unsub;
-  }, []);
+    getDocs(collection(db, 'users'))
+      .then(snap => setUsers(snap.docs.map(d => ({ uid: d.id, ...d.data() } as UserDoc))))
+      .finally(() => setLoading(false));
+  }, [authLoading, authUser?.uid]);
 
   const createUser = async () => {
     setError('');

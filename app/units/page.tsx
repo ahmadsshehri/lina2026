@@ -1,9 +1,9 @@
 'use client';
 import { useEffect, useState } from 'react';
-import { onAuthStateChanged } from 'firebase/auth';
-import { auth, db } from '../../lib/firebase';
-import { collection, getDocs, addDoc, updateDoc, deleteDoc, doc, query, where, serverTimestamp, getDoc } from 'firebase/firestore';
+import { db } from '../../lib/firebase';
+import { collection, getDocs, addDoc, updateDoc, deleteDoc, doc, query, where, serverTimestamp } from 'firebase/firestore';
 import { useRouter } from 'next/navigation';
+import { useAuth } from '../../context/AuthContext';
 
 interface Unit {
   id: string; unitNumber: string;
@@ -18,26 +18,10 @@ const STATUS_LABEL: Record<string, string> = { occupied: 'مشغول', vacant: '
 const TYPE_COLOR: Record<string, string> = { monthly: '#dbeafe', furnished: '#d1fae5', owner: '#fef3c7' };
 const STATUS_DOT: Record<string, string> = { occupied: '#16a34a', vacant: '#dc2626', maintenance: '#d97706' };
 
-async function loadPropertiesForUser(uid: string, role: string) {
-  if (role === 'owner') {
-    const snap = await getDocs(query(collection(db, 'properties'), where('ownerId', '==', uid)));
-    return snap.docs.map((d: any) => ({ id: d.id, name: d.data().name }));
-  }
-  const userSnap = await getDoc(doc(db, 'users', uid));
-  if (!userSnap.exists()) return [];
-  const ids: string[] = (userSnap.data() as any).propertyIds || [];
-  if (ids.length === 0) return [];
-  const results: any[] = [];
-  for (let i = 0; i < ids.length; i += 10) {
-    const chunk = ids.slice(i, i + 10);
-    const snap = await getDocs(query(collection(db, 'properties'), where('__name__', 'in', chunk)));
-    snap.docs.forEach((d: any) => results.push({ id: d.id, name: d.data().name }));
-  }
-  return results;
-}
-
 export default function UnitsPage() {
   const router = useRouter();
+  const { appUser: authUser, properties: authProps, activeProperty, loading: authLoading } = useAuth();
+
   const [units, setUnits] = useState<Unit[]>([]);
   const [properties, setProperties] = useState<Property[]>([]);
   const [activePropertyId, setActivePropertyId] = useState('');
@@ -58,31 +42,23 @@ export default function UnitsPage() {
   const canAddProperty = userRole === 'owner';
 
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, async (user) => {
-      if (!user) { router.push('/login'); return; }
-      const userSnap = await getDoc(doc(db, 'users', user.uid));
-      const role = userSnap.exists() ? (userSnap.data() as any).role : '';
-      setUserRole(role);
+    if (authLoading) return;
+    if (!authUser) { router.push('/login'); return; }
 
-      // المحاسب وصيانة لا يدخلوا صفحة الوحدات بالكامل
-      if (role === 'accountant' || role === 'maintenance') {
-        router.push('/');
-        return;
-      }
+    const role = authUser.role;
+    setUserRole(role);
 
-      const props = await loadPropertiesForUser(user.uid, role);
-      setProperties(props);
-     if (props.length > 0) {
-  const savedId = localStorage.getItem('selectedPropertyId');
-  const saved = props.find((p: any) => p.id === savedId);
-  const selected = saved || props[0];
-  setActivePropertyId(selected.id);
-  await loadUnits(selected.id);
-}
-      setLoading(false);
-    });
-    return unsub;
-  }, []);
+    if (role === 'accountant' || role === 'maintenance') {
+      router.push('/');
+      return;
+    }
+
+    if (!activeProperty) { setLoading(false); return; }
+
+    setProperties(authProps.map(p => ({ id: p.id, name: p.name })));
+    setActivePropertyId(activeProperty.id);
+    loadUnits(activeProperty.id).then(() => setLoading(false));
+  }, [authLoading, authUser?.uid, activeProperty?.id]);
 
   const loadUnits = async (propertyId: string) => {
     const snap = await getDocs(query(collection(db, 'units'), where('propertyId', '==', propertyId)));
@@ -144,10 +120,9 @@ export default function UnitsPage() {
     if (!propForm.name || !canAddProperty) return;
     setSaving(true);
     try {
-      const user = auth.currentUser;
       const ref = await addDoc(collection(db, 'properties'), {
         ...propForm, totalUnits: Number(propForm.totalUnits) || 0,
-        ownerId: user?.uid, managerId: user?.uid, createdAt: serverTimestamp(),
+        ownerId: authUser?.uid, managerId: authUser?.uid, createdAt: serverTimestamp(),
       });
       setProperties(p => [...p, { id: ref.id, name: propForm.name }]);
       setActivePropertyId(ref.id);

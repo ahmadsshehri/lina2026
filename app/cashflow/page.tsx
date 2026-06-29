@@ -1,13 +1,13 @@
 'use client';
 import { useEffect, useState, useRef, useCallback } from 'react';
-import { onAuthStateChanged } from 'firebase/auth';
-import { auth, db } from '../../lib/firebase';
+import { db } from '../../lib/firebase';
 import {
   collection, getDocs, addDoc, updateDoc, deleteDoc,
   doc, query, where, serverTimestamp, Timestamp,
 } from 'firebase/firestore';
 import { useRouter } from 'next/navigation';
-import { getCurrentUser, loadPropertiesForUser, AppUserBasic, PropertyBasic } from '../../lib/userHelpers';
+import { AppUserBasic, PropertyBasic } from '../../lib/userHelpers';
+import { useAuth } from '../../context/AuthContext';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 interface Transfer {
@@ -128,6 +128,8 @@ function DetailTooltip({ items, total, title, color, bg, empty, canDelete, onDel
 // ─── Main ─────────────────────────────────────────────────────────────────────
 export default function CashflowPage() {
   const router = useRouter();
+  const { appUser: authUser, properties: authProps, activeProperty, loading: authLoading } = useAuth();
+
   const [appUser,    setAppUser]    = useState<AppUserBasic | null>(null);
   const [properties, setProperties] = useState<PropertyBasic[]>([]);
   const [propId,     setPropId]     = useState('');
@@ -161,25 +163,16 @@ export default function CashflowPage() {
 
   // ─── Auth ────────────────────────────────────────────────────────────────
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, async (fbUser) => {
-      if (!fbUser) { router.push('/login'); return; }
-      const user = await getCurrentUser(fbUser.uid);
-      if (!user)  { router.push('/login'); return; }
-      setAppUser(user);
-      const props = await loadPropertiesForUser(fbUser.uid, user.role);
-      setProperties(props);
-  if (props.length > 0) {
-  const savedId = localStorage.getItem('selectedPropertyId');
-  const saved = props.find(p => p.id === savedId);
-  const selected = saved || props[0];
-  setPropId(selected.id);
-  propIdRef.current = selected.id;
-  await loadData(selected.id, currentMonthStr());
-}
-      setLoading(false);
-    });
-    return unsub;
-  }, []);
+    if (authLoading) return;
+    if (!authUser) { router.push('/login'); return; }
+    if (!activeProperty) { setLoading(false); return; }
+
+    setAppUser(authUser as AppUserBasic);
+    setProperties(authProps);
+    setPropId(activeProperty.id);
+    propIdRef.current = activeProperty.id;
+    loadData(activeProperty.id, currentMonthStr()).then(() => setLoading(false));
+  }, [authLoading, authUser?.uid, activeProperty?.id]);
 
   useEffect(() => {
     const onVis = () => { if (document.visibilityState==='visible'&&propIdRef.current) loadData(propIdRef.current, selectedMonthRef.current); };

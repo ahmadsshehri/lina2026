@@ -1,14 +1,14 @@
 'use client';
 import { useEffect, useState, useMemo } from 'react';
-import { onAuthStateChanged } from 'firebase/auth';
-import { auth, db } from '../../lib/firebase';
+import { db } from '../../lib/firebase';
 import {
   collection, getDocs, addDoc, deleteDoc, doc,
   query, where, serverTimestamp, Timestamp, getDoc, updateDoc,
 } from 'firebase/firestore';
 import { useRouter } from 'next/navigation';
-import { getCurrentUser, loadPropertiesForUser, AppUserBasic, PropertyBasic } from '../../lib/userHelpers';
+import { AppUserBasic, PropertyBasic } from '../../lib/userHelpers';
 import { notify } from '../../lib/notifications';
+import { useAuth } from '../../context/AuthContext';
 
 interface Expense {
   id: string; category: string; subcategory: string;
@@ -43,6 +43,8 @@ function currentMonthStr() {
 
 export default function ExpensesPage() {
   const router = useRouter();
+  const { appUser: authUser, properties: authProps, activeProperty, loading: authLoading } = useAuth();
+
   const [appUser,    setAppUser]    = useState<AppUserBasic | null>(null);
   const [properties, setProperties] = useState<PropertyBasic[]>([]);
   const [propId,     setPropId]     = useState('');
@@ -74,25 +76,16 @@ export default function ExpensesPage() {
   const yearOptions = Array.from({ length:10 }, (_,i) => String(new Date().getFullYear()-i));
 
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, async (fbUser) => {
-      if (!fbUser) { router.push('/login'); return; }
-      const user = await getCurrentUser(fbUser.uid);
-      if (!user)  { router.push('/login'); return; }
-      setAppUser(user);
-      const props = await loadPropertiesForUser(fbUser.uid, user.role);
-      setProperties(props);
-      if (props.length > 0) {
-        const savedId = localStorage.getItem('selectedPropertyId');
-        const saved = props.find(p => p.id === savedId);
-        const selected = saved || props[0];
-        setPropId(selected.id);
-        setPropName(selected.name);
-        await loadExpenses(selected.id);
-      }
-      setLoading(false);
-    });
-    return unsub;
-  }, []);
+    if (authLoading) return;
+    if (!authUser) { router.push('/login'); return; }
+    if (!activeProperty) { setLoading(false); return; }
+
+    setAppUser(authUser as AppUserBasic);
+    setProperties(authProps);
+    setPropId(activeProperty.id);
+    setPropName(activeProperty.name);
+    loadExpenses(activeProperty.id).then(() => setLoading(false));
+  }, [authLoading, authUser?.uid, activeProperty?.id]);
 
   const loadExpenses = async (pid: string) => {
     const snap = await getDocs(query(collection(db,'expenses'), where('propertyId','==',pid)));
@@ -156,7 +149,7 @@ export default function ExpensesPage() {
         ...form, propertyId:propId,
         amount: Number(form.amount),
         date: form.date ? Timestamp.fromDate(new Date(form.date)) : Timestamp.now(),
-        recordedBy: auth.currentUser?.uid,
+        recordedBy: authUser?.uid,
         createdAt: serverTimestamp(),
       });
       // 🔔 إشعار إضافة مصروف
@@ -200,7 +193,7 @@ export default function ExpensesPage() {
     try {
       await addDoc(collection(db,'deleteRequests'), {
         type:'expense', documentId:deleteTarget.id, propertyId:propId,
-        requestedBy:auth.currentUser?.uid, requestedByName:appUser?.name,
+        requestedBy:authUser?.uid, requestedByName:appUser?.name,
         requestedByRole:appUser?.role, reason:deleteReason, status:'pending',
         expenseDetails:{ category:deleteTarget.category, subcategory:deleteTarget.subcategory, amount:deleteTarget.amount, date:deleteTarget.date },
         createdAt:serverTimestamp(),
