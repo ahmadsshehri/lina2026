@@ -47,7 +47,7 @@ export default function UsersPage() {
     setAppUser(authUser as AppUserBasic);
     setProperties(authProps);
 
-    getDocs(collection(db, 'users'))
+    getDocs(query(collection(db, 'users'), where('ownerId', '==', authUser.uid)))
       .then(snap => setUsers(snap.docs.map(d => ({ uid: d.id, ...d.data() } as UserDoc))))
       .finally(() => setLoading(false));
   }, [authLoading, authUser?.uid]);
@@ -88,7 +88,8 @@ export default function UsersPage() {
         email: form.email.trim().toLowerCase(),
         phone: form.phone.trim(),
         role: form.role,
-        propertyIds: form.propertyIds,  // ← المصفوفة بـ IDs العقارات
+        propertyIds: form.propertyIds,
+        ownerId: appUser!.uid,
         isActive: true,
         createdAt: serverTimestamp(),
       });

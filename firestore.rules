@@ -27,10 +27,17 @@ service cloud.firestore {
 
     // ─── المستخدمون ─────────────────────────────────────────────
     match /users/{userId} {
-      allow read:   if isAuth() && (request.auth.uid == userId || isOwner());
+      // المستخدم يقرأ ملفه فقط، أو المالك يقرأ المستخدمين الذين أنشأهم
+      allow read:   if isAuth() && (
+                      request.auth.uid == userId ||
+                      (isOwner() && resource.data.ownerId == request.auth.uid)
+                    );
       allow create: if isOwner();
-      allow update: if isOwner() || request.auth.uid == userId;
-      allow delete: if isOwner();
+      allow update: if isAuth() && (
+                      (isOwner() && resource.data.ownerId == request.auth.uid) ||
+                      request.auth.uid == userId
+                    );
+      allow delete: if isOwner() && resource.data.ownerId == request.auth.uid;
     }
 
     // ─── العقارات ────────────────────────────────────────────────
