@@ -199,7 +199,7 @@ export default function TenantDetailPage() {
 
   const schedule = buildSchedule();
   const totalPaid    = payments.reduce((s,p)=>s+(p.amountPaid||0),0);
-  const totalBalance = payments.reduce((s,p)=>s+(p.balance||0),0);
+  const totalBalance = schedule.filter(r => r.status !== 'upcoming').reduce((s,r)=>s+r.balance,0);
   const totalExpected = schedule.reduce((s,r)=>s+r.due,0);
 
   if (loading) return (

@@ -1,7 +1,7 @@
 'use client';
 import { useEffect, useState, useRef } from 'react';
 import { auth, db } from '../lib/firebase';
-import { collection, getDocs, query, where } from 'firebase/firestore';
+import { collection, getDocs, query, where, orderBy, limit } from 'firebase/firestore';
 import { useRouter } from 'next/navigation';
 import { AppUserBasic, PropertyBasic } from '../lib/userHelpers';
 import { loadNotifications, markAllRead, NotifDoc, NOTIF_META } from '../lib/notifications';
@@ -79,6 +79,7 @@ export default function HomePage() {
   const [activeProp,     setActiveProp]     = useState<PropertyBasic | null>(null);
   const [showPropPicker, setShowPropPicker] = useState(false);
   const [stats,          setStats]          = useState({ units:0, tenants:0, bookings:0 });
+  const [pulse,          setPulse]          = useState<{ unpaidCount:number; recentExpenses:{ id:string; description:string; amount:number; category:string; date:any }[] }>({ unpaidCount:0, recentExpenses:[] });
   const [error,          setError]          = useState('');
 
   // ── Notifications state ──────────────────────────────────────────────────
@@ -100,6 +101,7 @@ export default function HomePage() {
     Promise.all([
       loadStats(authActiveProp.id),
       loadNotifs(authActiveProp.id),
+      loadPulse(authActiveProp.id),
     ])
       .catch((err: any) => setError('حدث خطأ: ' + err.message))
       .finally(() => setLoading(false));
@@ -132,6 +134,30 @@ export default function HomePage() {
     });
   };
 
+  const loadPulse = async (pid: string) => {
+    const now = new Date();
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+    const [tSnap, pSnap, eSnap] = await Promise.all([
+      getDocs(query(collection(db, 'tenants'), where('propertyId', '==', pid), where('status', '==', 'active'))),
+      getDocs(query(collection(db, 'rentPayments'), where('propertyId', '==', pid))),
+      getDocs(query(collection(db, 'expenses'), where('propertyId', '==', pid), orderBy('date', 'desc'), limit(10))),
+    ]);
+    const allPayments = pSnap.docs.map(d => ({ id: d.id, ...d.data() } as any));
+    let unpaidCount = 0;
+    tSnap.docs.forEach(td => {
+      const t = td.data() as any;
+      const tp = allPayments.filter((p: any) => p.tenantId === td.id);
+      const hasPaidThisMonth = tp.some((p: any) => {
+        if (p.periodYear === now.getFullYear() && p.periodMonth === now.getMonth() + 1) return true;
+        const pd = p.paidDate?.toDate ? p.paidDate.toDate() : p.paidDate ? new Date(p.paidDate) : null;
+        return pd && pd >= monthStart;
+      });
+      if (!hasPaidThisMonth) unpaidCount++;
+    });
+    const recentExpenses = eSnap.docs.map(d => ({ id: d.id, ...d.data() } as any));
+    setPulse({ unpaidCount, recentExpenses });
+  };
+
   const loadNotifs = async (pid: string) => {
     const data = await loadNotifications(pid);
     setNotifs(data);
@@ -150,7 +176,7 @@ export default function HomePage() {
     setActiveProp(prop);
     setAuthActiveProp(prop);
     setShowPropPicker(false);
-    await Promise.all([loadStats(prop.id), loadNotifs(prop.id)]);
+    await Promise.all([loadStats(prop.id), loadNotifs(prop.id), loadPulse(prop.id)]);
   };
 
   const getStatVal = (key: string) => {
@@ -353,6 +379,51 @@ export default function HomePage() {
           </div>
         ))}
       </div>
+
+      {/* ══ PULSE SECTION ══ */}
+      {activeProp && (
+        <div style={{ padding:'0 16px', marginBottom:'22px' }}>
+
+          {/* Unpaid this month */}
+          <div
+            onClick={() => router.push('/monthly?filter=late')}
+            style={{ background: pulse.unpaidCount > 0 ? 'linear-gradient(135deg,#FEF3C7,#FDE68A)' : 'linear-gradient(135deg,#D1FAE5,#A7F3D0)', borderRadius:'18px', padding:'14px 16px', marginBottom:'12px', display:'flex', alignItems:'center', gap:'12px', cursor:'pointer', border: pulse.unpaidCount > 0 ? '1.5px solid #FCD34D' : '1.5px solid #6EE7B7', boxShadow:'0 4px 16px rgba(0,0,0,0.06)' }}>
+            <div style={{ fontSize:'32px' }}>{pulse.unpaidCount > 0 ? '⚠️' : '✅'}</div>
+            <div style={{ flex:1 }}>
+              <div style={{ fontSize:'14px', fontWeight:'700', color: pulse.unpaidCount > 0 ? '#92400E' : '#065F46' }}>
+                {pulse.unpaidCount > 0 ? `${pulse.unpaidCount} مستأجر لم يدفع هذا الشهر` : 'جميع المستأجرين دفعوا هذا الشهر'}
+              </div>
+              <div style={{ fontSize:'11px', color: pulse.unpaidCount > 0 ? '#B45309' : '#047857', marginTop:'2px' }}>
+                {pulse.unpaidCount > 0 ? 'اضغط لمتابعة المتأخرين' : 'أداء ممتاز للتحصيل 🎉'}
+              </div>
+            </div>
+            {pulse.unpaidCount > 0 && <div style={{ fontSize:'20px', color:'#D97706' }}>‹</div>}
+          </div>
+
+          {/* Recent expenses */}
+          {pulse.recentExpenses.length > 0 && (
+            <div style={{ background:'#fff', borderRadius:'18px', border:'1px solid #e5e7eb', overflow:'hidden', boxShadow:'0 4px 16px rgba(27,79,114,0.06)' }}>
+              <div style={{ padding:'12px 16px', borderBottom:'1px solid #f1f5f9', display:'flex', justifyContent:'space-between', alignItems:'center' }}>
+                <div style={{ fontSize:'13px', fontWeight:'700', color:'#1e293b' }}>📋 آخر المصاريف</div>
+                <button onClick={() => router.push('/expenses')} style={{ fontSize:'11px', color:'#1B4F72', background:'#EBF5FB', border:'none', borderRadius:'8px', padding:'4px 10px', cursor:'pointer', fontFamily:'sans-serif' }}>عرض الكل</button>
+              </div>
+              {pulse.recentExpenses.map((e, i) => {
+                const d = e.date?.toDate ? e.date.toDate() : e.date ? new Date(e.date) : null;
+                const dateStr = d ? `${d.getDate()}/${d.getMonth()+1}/${d.getFullYear()}` : '—';
+                return (
+                  <div key={e.id} style={{ padding:'11px 16px', borderBottom: i < pulse.recentExpenses.length - 1 ? '1px solid #f9fafb' : 'none', display:'flex', alignItems:'center', gap:'12px' }}>
+                    <div style={{ flex:1, minWidth:0 }}>
+                      <div style={{ fontSize:'13px', fontWeight:'500', color:'#374151', overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{e.description || e.category || 'مصروف'}</div>
+                      <div style={{ fontSize:'11px', color:'#9ca3af', marginTop:'2px' }}>{dateStr}{e.category ? ` · ${e.category}` : ''}</div>
+                    </div>
+                    <div style={{ fontSize:'14px', fontWeight:'700', color:'#E74C3C', flexShrink:0 }}>{(e.amount||0).toLocaleString('ar-SA')} ر.س</div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* ══ MENU ══ */}
       <div style={{ fontSize:'12px', fontWeight:'700', color:'#64748b', letterSpacing:'0.4px', padding:'0 16px', marginBottom:'12px' }}>القائمة الرئيسية</div>
