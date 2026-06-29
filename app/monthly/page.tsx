@@ -529,6 +529,51 @@ export default function MonthlyPage() {
         {/* ══ TAB: المستأجرون النشطون ══ */}
         {tab === 'active' && (
           <>
+            {/* ── Unit Status Grid ── */}
+            {units.filter(u => u.type !== 'furnished').length > 0 && (
+              <div style={{ background:'#fff', borderRadius:'16px', border:'1px solid #e5e7eb', padding:'14px 16px', marginBottom:'14px' }}>
+                <div style={{ fontSize:'12px', fontWeight:'600', color:'#6b7280', marginBottom:'10px' }}>نظرة عامة على الوحدات</div>
+                <div style={{ display:'flex', gap:'6px', flexWrap:'wrap' }}>
+                  {units.filter(u => u.type !== 'furnished')
+                    .sort((a,b) => a.unitNumber.localeCompare(b.unitNumber, undefined, { numeric:true }))
+                    .map(u => {
+                      const tenant = activeTenants.find(t => t.unitId === u.id);
+                      if (!tenant) {
+                        return (
+                          <div key={u.id} title={`شقة ${u.unitNumber} — شاغرة`}
+                            style={{ width:'38px', height:'38px', borderRadius:'8px', background:'#f1f5f9', border:'1.5px solid #e2e8f0', display:'flex', alignItems:'center', justifyContent:'center', fontSize:'11px', fontWeight:'600', color:'#94a3b8', cursor:'default' }}>
+                            {u.unitNumber}
+                          </div>
+                        );
+                      }
+                      const tp = payments.filter(p => p.tenantId === tenant.id);
+                      const schedule = buildPaymentSchedule(tenant, tp);
+                      const hasLate    = schedule.some(s => s.status === 'late');
+                      const hasPartial = schedule.some(s => s.status === 'partial');
+                      const allPaid    = schedule.length > 0 && schedule.every(s => s.status === 'paid' || s.status === 'upcoming');
+                      const bg    = hasLate ? '#fee2e2' : hasPartial ? '#fef3c7' : allPaid ? '#d1fae5' : '#dbeafe';
+                      const color = hasLate ? '#dc2626' : hasPartial ? '#92400e' : allPaid ? '#065f46' : '#1e40af';
+                      const border= hasLate ? '#fca5a5' : hasPartial ? '#fbbf24' : allPaid ? '#6ee7b7' : '#93c5fd';
+                      const tip   = hasLate ? 'متأخر' : hasPartial ? 'جزئي' : allPaid ? 'مسدد' : 'مستحق';
+                      return (
+                        <button key={u.id} title={`شقة ${u.unitNumber} — ${tenant.name} — ${tip}`}
+                          onClick={() => setSearchQuery(u.unitNumber)}
+                          style={{ width:'38px', height:'38px', borderRadius:'8px', background:bg, border:`1.5px solid ${border}`, display:'flex', alignItems:'center', justifyContent:'center', fontSize:'11px', fontWeight:'700', color, cursor:'pointer', fontFamily:'sans-serif' }}>
+                          {u.unitNumber}
+                        </button>
+                      );
+                    })}
+                </div>
+                <div style={{ display:'flex', gap:'12px', marginTop:'10px', flexWrap:'wrap' }}>
+                  {[['#fee2e2','#fca5a5','#dc2626','متأخر'],['#fef3c7','#fbbf24','#92400e','جزئي'],['#d1fae5','#6ee7b7','#065f46','مسدد'],['#dbeafe','#93c5fd','#1e40af','مستحق'],['#f1f5f9','#e2e8f0','#94a3b8','شاغرة']].map(([bg,border,color,label]) => (
+                    <div key={label} style={{ display:'flex', alignItems:'center', gap:'5px' }}>
+                      <div style={{ width:'14px', height:'14px', borderRadius:'3px', background:bg, border:`1.5px solid ${border}` }}/>
+                      <span style={{ fontSize:'11px', color:'#6b7280' }}>{label}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
             {expiredTenants.length > 0 && (
               <div style={{ background:'#fee2e2', border:'1px solid #fca5a5', borderRadius:'12px', padding:'12px 16px', marginBottom:'14px' }}>
                 <div style={{ fontSize:'13px', fontWeight:'600', color:'#dc2626', marginBottom:'6px' }}>⚠️ {expiredTenants.length} عقد منتهٍ — يحتاج إجراء</div>
@@ -559,7 +604,7 @@ export default function MonthlyPage() {
                   const schedule      = buildPaymentSchedule(t, tp);
                   const currentPeriod = schedule.find(s => s.status==='current'||s.status==='late'||s.status==='partial');
                   const daysLeft      = daysUntil(t.contractEnd);
-                  const totalArrears  = schedule.reduce((s,p) => s+p.balance, 0);
+                  const totalArrears  = schedule.filter(p => p.status !== 'upcoming').reduce((s,p) => s+p.balance, 0);
                   const unit          = units.find(u => u.id === t.unitId);
                   return (
                     <div key={t.id} style={{ background:'#fff', borderRadius:'18px', border:`1px solid ${daysLeft<0?'#fca5a5':daysLeft<=30?'#fbbf24':'#e5e7eb'}`, overflow:'hidden', boxShadow:'0 4px 16px rgba(27,79,114,0.08)' }}>
@@ -633,7 +678,7 @@ export default function MonthlyPage() {
               const tp       = payments.filter(p => p.tenantId === t.id);
               const schedule = buildPaymentSchedule(t, tp);
               if (schedule.length === 0) return null;
-              const totalArrears = schedule.reduce((s,p) => s+p.balance, 0);
+              const totalArrears = schedule.filter(p => p.status !== 'upcoming').reduce((s,p) => s+p.balance, 0);
               return (
                 <div key={t.id} style={{ background:'#fff', borderRadius:'14px', border:'1px solid #e5e7eb', marginBottom:'14px', overflow:'hidden' }}>
                   <div style={{ padding:'12px 16px', background:'#1B4F72', display:'flex', alignItems:'center', justifyContent:'space-between' }}>
