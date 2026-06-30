@@ -1,7 +1,7 @@
 'use client';
 import { useEffect, useState, useRef } from 'react';
 import { auth, db } from '../lib/firebase';
-import { collection, getDocs, query, where, orderBy, limit } from 'firebase/firestore';
+import { collection, getDocs, query, where } from 'firebase/firestore';
 import { useRouter } from 'next/navigation';
 import { AppUserBasic, PropertyBasic } from '../lib/userHelpers';
 import { loadNotifications, markAllRead, NotifDoc, NOTIF_META } from '../lib/notifications';
@@ -140,7 +140,7 @@ export default function HomePage() {
     const [tSnap, pSnap, eSnap] = await Promise.all([
       getDocs(query(collection(db, 'tenants'), where('propertyId', '==', pid), where('status', '==', 'active'))),
       getDocs(query(collection(db, 'rentPayments'), where('propertyId', '==', pid))),
-      getDocs(query(collection(db, 'expenses'), where('propertyId', '==', pid), orderBy('date', 'desc'), limit(10))),
+      getDocs(query(collection(db, 'expenses'), where('propertyId', '==', pid))),
     ]);
     const allPayments = pSnap.docs.map(d => ({ id: d.id, ...d.data() } as any));
     let unpaidCount = 0;
@@ -154,7 +154,14 @@ export default function HomePage() {
       });
       if (!hasPaidThisMonth) unpaidCount++;
     });
-    const recentExpenses = eSnap.docs.map(d => ({ id: d.id, ...d.data() } as any));
+    const toMs = (v: any) => {
+      const d = v?.toDate ? v.toDate() : v ? new Date(v) : null;
+      return d ? d.getTime() : 0;
+    };
+    const recentExpenses = eSnap.docs
+      .map(d => ({ id: d.id, ...d.data() } as any))
+      .sort((a, b) => toMs(b.date) - toMs(a.date))
+      .slice(0, 10);
     setPulse({ unpaidCount, recentExpenses });
   };
 
