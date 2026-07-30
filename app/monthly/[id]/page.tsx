@@ -181,15 +181,21 @@ export default function TenantDetailPage() {
         return d >= periodStart && d <= new Date(periodEnd.getFullYear(), periodEnd.getMonth()+1, 0);
       });
       const totalPaid = periodPaid.reduce((s,p) => s+(p.amountPaid||0), 0);
-      const due = tenant.rentAmount * step;
+      // إن وُجدت دفعة مسجلة لهذه الفترة (قد تتضمن خصمًا) نعتمد المبلغ المطلوب المسجل عليها
+      // بدل الإيجار الأساسي، حتى لا تُحتسب فروقات الخصم كمتأخرات
+      const due = periodPaid.length > 0
+        ? Math.max(...periodPaid.map(p => p.amountDue || 0))
+        : tenant.rentAmount * step;
       const balance = Math.max(0, due - totalPaid);
+      const isPastDue = new Date() > periodEnd;
 
       schedule.push({
         label: step === 1 ? monthLabel(cur) : `${monthLabel(cur)} — ${monthLabel(new Date(periodEnd))}`,
         due,
         paid: totalPaid,
         balance,
-        status: totalPaid >= due ? 'paid' : totalPaid > 0 ? 'partial' : new Date() > periodEnd ? 'late' : 'upcoming',
+        isPastDue,
+        status: totalPaid >= due ? 'paid' : totalPaid > 0 ? 'partial' : isPastDue ? 'late' : 'upcoming',
       });
 
       cur = new Date(cur.getFullYear(), cur.getMonth() + step, 1);
@@ -198,9 +204,12 @@ export default function TenantDetailPage() {
   };
 
   const schedule = buildSchedule();
-  const totalPaid    = payments.reduce((s,p)=>s+(p.amountPaid||0),0);
-  const totalBalance = schedule.filter(r => r.status !== 'upcoming').reduce((s,r)=>s+r.balance,0);
-  const totalExpected = schedule.reduce((s,r)=>s+r.due,0);
+  const totalPaid     = payments.reduce((s,p)=>s+(p.amountPaid||0),0);
+  const totalContract = schedule.reduce((s,r)=>s+r.due,0);
+  // المتأخرات: فقط الفترات التي حان استحقاقها فعليًا ولم تُسدد بالكامل
+  const totalArrears  = schedule.filter(r => r.isPastDue).reduce((s,r)=>s+r.balance,0);
+  // القادم: الفترات المستقبلية التي لم يحن استحقاقها بعد
+  const totalUpcoming = schedule.filter(r => !r.isPastDue).reduce((s,r)=>s+r.balance,0);
 
   if (loading) return (
     <div style={{display:'flex',justifyContent:'center',alignItems:'center',height:'100vh'}}>
@@ -235,15 +244,16 @@ export default function TenantDetailPage() {
       <div style={{padding:'16px',maxWidth:'700px',margin:'0 auto'}}>
 
         {/* KPIs */}
-        <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:'10px',marginBottom:'16px'}}>
+        <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:'8px',marginBottom:'16px'}}>
           {[
-            {label:'إجمالي المدفوع',val:totalPaid.toLocaleString('ar-SA')+' ر.س',color:'#16a34a',bg:'#d1fae5'},
-            {label:'المتأخرات',val:totalBalance.toLocaleString('ar-SA')+' ر.س',color:totalBalance>0?'#dc2626':'#16a34a',bg:totalBalance>0?'#fee2e2':'#d1fae5'},
-            {label:'الإيجار الشهري',val:tenant.rentAmount.toLocaleString('ar-SA')+' ر.س',color:'#1B4F72',bg:'#dbeafe'},
+            {label:'إجمالي العقد',val:totalContract.toLocaleString('ar-SA')+' ر.س',color:'#1B4F72',bg:'#dbeafe'},
+            {label:'المسدد',val:totalPaid.toLocaleString('ar-SA')+' ر.س',color:'#16a34a',bg:'#d1fae5'},
+            {label:'المتأخرات',val:totalArrears.toLocaleString('ar-SA')+' ر.س',color:totalArrears>0?'#dc2626':'#16a34a',bg:totalArrears>0?'#fee2e2':'#d1fae5'},
+            {label:'القادم',val:totalUpcoming.toLocaleString('ar-SA')+' ر.س',color:'#1e40af',bg:'#f0f9ff'},
           ].map(k=>(
-            <div key={k.label} style={{background:k.bg,borderRadius:'14px',padding:'14px 12px',textAlign:'center'}}>
-              <div style={{fontSize:'16px',fontWeight:'700',color:k.color}}>{k.val}</div>
-              <div style={{fontSize:'11px',color:'#6b7280',marginTop:'3px'}}>{k.label}</div>
+            <div key={k.label} style={{background:k.bg,borderRadius:'14px',padding:'10px 6px',textAlign:'center'}}>
+              <div style={{fontSize:'13px',fontWeight:'700',color:k.color}}>{k.val}</div>
+              <div style={{fontSize:'10px',color:'#6b7280',marginTop:'3px'}}>{k.label}</div>
             </div>
           ))}
         </div>
@@ -414,7 +424,7 @@ export default function TenantDetailPage() {
                 <div style={{fontSize:'13px',fontWeight:'600',color:'#374151',marginBottom:'12px'}}>ملخص مالي</div>
                 {[
                   ['إجمالي المدفوع',totalPaid.toLocaleString('ar-SA')+' ر.س','#16a34a'],
-                  ['إجمالي المتأخرات',totalBalance.toLocaleString('ar-SA')+' ر.س',totalBalance>0?'#dc2626':'#16a34a'],
+                  ['إجمالي المتأخرات',totalArrears.toLocaleString('ar-SA')+' ر.س',totalArrears>0?'#dc2626':'#16a34a'],
                   ['عدد الدفعات',payments.length+' دفعة','#1B4F72'],
                 ].map(([l,v,c])=>(
                   <div key={String(l)} style={{display:'flex',justifyContent:'space-between',padding:'8px 0',borderBottom:'1px solid #f3f4f6'}}>
@@ -432,14 +442,15 @@ export default function TenantDetailPage() {
           <div>
             <div style={{background:'#fff',borderRadius:'14px',border:'1px solid #e5e7eb',padding:'16px',marginBottom:'14px'}}>
               <div style={{fontSize:'13px',fontWeight:'600',color:'#374151',marginBottom:'12px'}}>ملخص جدول السداد</div>
-              <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:'10px'}}>
+              <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:'8px'}}>
                 {[
-                  {label:'إجمالي المطلوب',val:totalExpected.toLocaleString('ar-SA')+' ر.س',color:'#1B4F72',bg:'#dbeafe'},
-                  {label:'إجمالي المدفوع',val:totalPaid.toLocaleString('ar-SA')+' ر.س',color:'#16a34a',bg:'#d1fae5'},
-                  {label:'المتأخرات',val:Math.max(0,totalExpected-totalPaid).toLocaleString('ar-SA')+' ر.س',color:(totalExpected-totalPaid)>0?'#dc2626':'#16a34a',bg:(totalExpected-totalPaid)>0?'#fee2e2':'#d1fae5'},
+                  {label:'إجمالي العقد',val:totalContract.toLocaleString('ar-SA')+' ر.س',color:'#1B4F72',bg:'#dbeafe'},
+                  {label:'المسدد',val:totalPaid.toLocaleString('ar-SA')+' ر.س',color:'#16a34a',bg:'#d1fae5'},
+                  {label:'المتأخرات',val:totalArrears.toLocaleString('ar-SA')+' ر.س',color:totalArrears>0?'#dc2626':'#16a34a',bg:totalArrears>0?'#fee2e2':'#d1fae5'},
+                  {label:'القادم',val:totalUpcoming.toLocaleString('ar-SA')+' ر.س',color:'#1e40af',bg:'#f0f9ff'},
                 ].map(k=>(
-                  <div key={k.label} style={{background:k.bg,borderRadius:'10px',padding:'12px',textAlign:'center'}}>
-                    <div style={{fontSize:'14px',fontWeight:'700',color:k.color}}>{k.val}</div>
+                  <div key={k.label} style={{background:k.bg,borderRadius:'10px',padding:'10px 6px',textAlign:'center'}}>
+                    <div style={{fontSize:'13px',fontWeight:'700',color:k.color}}>{k.val}</div>
                     <div style={{fontSize:'10px',color:'#6b7280',marginTop:'2px'}}>{k.label}</div>
                   </div>
                 ))}

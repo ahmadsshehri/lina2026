@@ -77,7 +77,6 @@ function buildPaymentSchedule(tenant: Tenant, payments: Payment[]) {
   while (cur <= endLimit) {
     const periodStart = new Date(cur);
     const periodEnd   = new Date(cur.getFullYear(), cur.getMonth() + step - 1, 28);
-    const due = tenant.rentAmount * step;
 
     const periodPays = payments.filter(p => {
       if (p.tenantId !== tenant.id) return false;
@@ -89,6 +88,12 @@ function buildPaymentSchedule(tenant: Tenant, payments: Payment[]) {
       const periodEndFull = new Date(periodEnd.getFullYear(), periodEnd.getMonth()+1, 0);
       return pd >= periodStart && pd <= periodEndFull;
     });
+
+    // إن وُجدت دفعة مسجلة لهذه الفترة (قد تتضمن خصمًا) نعتمد المبلغ المطلوب المسجل عليها
+    // بدل الإيجار الأساسي، حتى لا تُحتسب فروقات الخصم كمتأخرات
+    const due = periodPays.length > 0
+      ? Math.max(...periodPays.map(p => p.amountDue || 0))
+      : tenant.rentAmount * step;
 
     const paid    = periodPays.reduce((s,p) => s+(p.amountPaid||0), 0);
     const balance = Math.max(0, due - paid);
