@@ -286,9 +286,11 @@ export default function CashflowPage() {
   };
 
   // ─── Derived ──────────────────────────────────────────────────────────────
-  const totalTransToOwner = transfers.filter(t=>t.type==='owner_transfer').reduce((s,t)=>s+t.amount,0);
+  const totalTransToOwner   = transfers.filter(t=>t.type==='owner_transfer').reduce((s,t)=>s+t.amount,0);
+  const totalTransToManager = transfers.filter(t=>t.type==='manager_expense').reduce((s,t)=>s+t.amount,0);
+  const netTransToOwner = totalTransToOwner - totalTransToManager;
   const dueToOwner  = (report?.rentByManager||0)+(report?.furnByManager||0)+(report?.otherByManager||0)-(report?.expByManager||0);
-  const remaining   = dueToOwner - totalTransToOwner;
+  const remaining   = dueToOwner - netTransToOwner;
 
   const monthOptions = Array.from({ length:12 }, (_,i) => {
     const d=new Date(); d.setMonth(d.getMonth()-i);
@@ -394,10 +396,16 @@ export default function CashflowPage() {
               <span style={{ color:'#374151', fontWeight:'600' }}>المستحق للمالك من المسؤول</span>
               <span style={{ color:'#1e40af', fontWeight:'700' }}>{dueToOwner.toLocaleString('ar-SA')} ر.س</span>
             </div>
-            <div style={{ display:'flex', justifyContent:'space-between', marginBottom:'8px', fontSize:'13px' }}>
+            <div style={{ display:'flex', justifyContent:'space-between', marginBottom:'6px', fontSize:'13px' }}>
               <span style={{ color:'#6b7280' }}>محوّل للمالك هذا الشهر</span>
               <span style={{ color:'#374151', fontWeight:'600' }}>− {totalTransToOwner.toLocaleString('ar-SA')} ر.س</span>
             </div>
+            {totalTransToManager>0 && (
+              <div style={{ display:'flex', justifyContent:'space-between', marginBottom:'8px', fontSize:'13px' }}>
+                <span style={{ color:'#6b7280' }}>محوّل للمسؤول هذا الشهر</span>
+                <span style={{ color:'#374151', fontWeight:'600' }}>+ {totalTransToManager.toLocaleString('ar-SA')} ر.س</span>
+              </div>
+            )}
             {remaining!==0 && (
               <div style={{ display:'flex', justifyContent:'space-between', padding:'10px 14px', background:remaining>0?'#fef3c7':'#fee2e2', borderRadius:'10px' }}>
                 <span style={{ fontSize:'13px', color:remaining>0?'#92400e':'#991b1b', fontWeight:'600' }}>{remaining>0?'⏳ متبقي للتحويل':'⚠️ تم تحويل أكثر من المستحق'}</span>
