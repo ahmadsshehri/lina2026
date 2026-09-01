@@ -28,6 +28,7 @@ interface TenantRow {
   name:          string;
   rentAmount:    number;
   payments:      Record<number, number>;
+  monthDue:      Record<number, number>;
   totalPaid:     number;
   totalExpected: number;
   balance:       number;
@@ -174,8 +175,14 @@ export default function ReportsPage() {
           totalPaid += monthAmount;
         });
 
-        // ✅ نحسب المبلغ المتوقع بناءً على من كان ساكناً فعلاً في كل شهر
+        // ✅ نحسب المبلغ المتوقع لكل شهر بناءً على من كان ساكناً فعلاً فيه
+        // إن وُجدت دفعة مسجلة لهذا المستأجر في الشهر (قد تتضمن خصمًا) نعتمد المبلغ
+        // المطلوب المسجل عليها بدل الإيجار الأساسي، حتى لا تُحتسب فروقات الخصم كمتأخرات
+        const monthDue: Record<number, number> = {};
         let totalExpected = 0;
+        let arrears = 0; // فقط الأشهر التي حان استحقاقها فعليًا ولم تُسدد بالكامل
+        const now = new Date();
+
         months.forEach(m => {
           const ms = new Date(y, m-1, 1);
           const me = new Date(y, m, 0, 23, 59, 59);
@@ -188,8 +195,23 @@ export default function ReportsPage() {
             return start <= me && end >= ms;
           });
 
+          let due = 0;
           if (tenantInMonth) {
-            totalExpected += tenantInMonth.rentAmount || 0;
+            const monthPaysForTenant = payments.filter((p:any) => {
+              if (p.tenantId !== tenantInMonth.id) return false;
+              const d = p.paidDate?.toDate ? p.paidDate.toDate() : null;
+              return d && d >= ms && d <= me;
+            });
+            due = monthPaysForTenant.length > 0
+              ? Math.max(...monthPaysForTenant.map((p:any) => p.amountDue || 0))
+              : (tenantInMonth.rentAmount || 0);
+          }
+
+          monthDue[m] = due;
+          totalExpected += due;
+          // لا تُحتسب الفترة كمتأخرات إلا إذا انتهت فعلاً ولم تُسدد بالكامل
+          if (due > 0 && me < now) {
+            arrears += Math.max(0, due - (monthPays[m] || 0));
           }
         });
 
@@ -229,9 +251,10 @@ export default function ReportsPage() {
           name:          displayName,
           rentAmount:    displayTenant?.rentAmount || 0,
           payments:      monthPays,
+          monthDue,
           totalPaid,
           totalExpected,
-          balance:       Math.max(0, totalExpected - totalPaid),
+          balance:       arrears,
           hasMultiple:   tenantsInPeriod.length > 1,
         };
       });
@@ -593,24 +616,18 @@ export default function ReportsPage() {
                               <td style={{ ...td, textAlign:'center', color:'#1e40af', fontWeight:'600' }}>{t.rentAmount?fmt(t.rentAmount):''}</td>
                               {months.map(m=>{
                                 const paid     = t.payments[m]||0;
-                                const expected = (() => {
-                                  // نتحقق من وجود مستأجر في هذا الشهر
-                                  const ms = new Date(y,m-1,1), me = new Date(y,m,0,23,59,59);
-                                  const ten = tenants.filter(ten => ten.unitId === units.find(u=>u.unitNumber===t.unitNumber)?.id).find(ten => {
-                                    const s = ten.contractStart?.toDate?ten.contractStart.toDate():null;
-                                    const e = ten.contractEnd?.toDate?ten.contractEnd.toDate():null;
-                                    return s&&e&&s<=me&&e>=ms;
-                                  });
-                                  return ten?.rentAmount || 0;
-                                })();
+                                const expected = t.monthDue[m]||0;
+                                const me       = new Date(y,m,0,23,59,59);
+                                const isPastDue = me < new Date();
                                 let bg='transparent', color='#374151', fw:'normal'|'600'|'700'='normal';
                                 if (!expected && !paid) { bg='#f3f4f6'; color='#9ca3af'; }
                                 else if (paid>0&&paid>=expected) { bg='#d1fae5'; color='#065f46'; fw='700'; }
                                 else if (paid>0&&paid<expected)  { bg='#fef3c7'; color='#92400e'; fw='600'; }
-                                else if (expected>0)             { bg='#fee2e2'; color='#dc2626'; }
+                                else if (expected>0&&isPastDue)  { bg='#fee2e2'; color='#dc2626'; }
+                                else if (expected>0)             { bg='#f0f9ff'; color='#1e40af'; }
                                 return (
                                   <td key={m} style={{ ...td, textAlign:'center', background:bg, color, fontWeight:fw }}>
-                                    {paid?fmt(paid):(expected?'✗':'')}
+                                    {paid?fmt(paid):(expected?(isPastDue?'✗':'—'):'')}
                                   </td>
                                 );
                               })}
