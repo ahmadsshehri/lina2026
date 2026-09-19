@@ -60,6 +60,7 @@ export default function ReportsPage() {
   const [payments, setPayments] = useState<any[]>([]);
   const [bookings, setBookings] = useState<any[]>([]);
   const [expenses, setExpenses] = useState<any[]>([]);
+  const [otherRevenue, setOtherRevenue] = useState<any[]>([]);
 
   // ─── Auth ──────────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -76,18 +77,20 @@ export default function ReportsPage() {
 
   const loadAllData = async (pid: string, year: string) => {
     setDataLoading(true);
-    const [uS,tS,pS,bS,eS] = await Promise.all([
+    const [uS,tS,pS,bS,eS,orS] = await Promise.all([
       getDocs(query(collection(db,'units'),        where('propertyId','==',pid))),
       getDocs(query(collection(db,'tenants'),      where('propertyId','==',pid))),
       getDocs(query(collection(db,'rentPayments'), where('propertyId','==',pid))),
       getDocs(query(collection(db,'bookings'),     where('propertyId','==',pid))),
       getDocs(query(collection(db,'expenses'),     where('propertyId','==',pid))),
+      getDocs(query(collection(db,'otherRevenue'), where('propertyId','==',pid))),
     ]);
     setUnits(uS.docs.map(d=>({id:d.id,...d.data()})));
     setTenants(tS.docs.map(d=>({id:d.id,...d.data()})));
     setPayments(pS.docs.map(d=>({id:d.id,...d.data()})));
     setBookings(bS.docs.map(d=>({id:d.id,...d.data()})));
     setExpenses(eS.docs.map(d=>({id:d.id,...d.data()})));
+    setOtherRevenue(orS.docs.map(d=>({id:d.id,...d.data()})));
     setDataLoading(false);
   };
 
@@ -122,14 +125,16 @@ export default function ReportsPage() {
   const reports = useMemo(() => Array.from({ length:12 }, (_,i) => {
     const m = i+1;
     const ms = new Date(y,m-1,1), me = new Date(y,m,0,23,59,59);
-    const mPay  = payments.filter(p=>{ const d=p.paidDate?.toDate?p.paidDate.toDate():null; return d&&d>=ms&&d<=me; });
-    const mBook = bookings.filter(b=>{ if(b.status==='cancelled')return false; const d=b.checkinDate?.toDate?b.checkinDate.toDate():null; return d&&d>=ms&&d<=me; });
-    const mExp  = expenses.filter(e=>{ const d=e.date?.toDate?e.date.toDate():null; return d&&d>=ms&&d<=me; });
+    const mPay   = payments.filter(p=>{ const d=p.paidDate?.toDate?p.paidDate.toDate():null; return d&&d>=ms&&d<=me; });
+    const mBook  = bookings.filter(b=>{ if(b.status==='cancelled')return false; const d=b.checkinDate?.toDate?b.checkinDate.toDate():null; return d&&d>=ms&&d<=me; });
+    const mExp   = expenses.filter(e=>{ const d=e.date?.toDate?e.date.toDate():null; return d&&d>=ms&&d<=me; });
+    const mOther = otherRevenue.filter(o=>{ const d=o.date?.toDate?o.date.toDate():null; return d&&d>=ms&&d<=me; });
     const rent  = mPay.reduce((s:number,p:any)=>s+(p.amountPaid||0),0);
     const furn  = mBook.reduce((s:number,b:any)=>s+(b.netRevenue||0),0);
+    const other = mOther.reduce((s:number,o:any)=>s+(o.amount||0),0);
     const exp   = mExp.reduce((s:number,e:any)=>s+(e.amount||0),0);
-    return { month:m, monthlyRevenue:rent, furnishedRevenue:furn, totalRevenue:rent+furn, totalExpenses:exp, netProfit:rent+furn-exp };
-  }), [payments, bookings, expenses, y]);
+    return { month:m, monthlyRevenue:rent, furnishedRevenue:furn, otherRevenue:other, totalRevenue:rent+furn+other, totalExpenses:exp, netProfit:rent+furn+other-exp };
+  }), [payments, bookings, expenses, otherRevenue, y]);
 
   const filteredReports = useMemo(() =>
     selectedMonth === 0 ? reports : reports.filter(r => r.month === selectedMonth)
@@ -493,11 +498,12 @@ export default function ReportsPage() {
                 {selectedMonth!==0 && (
                   <div style={{ background:'#fff', borderRadius:'14px', border:'1px solid #e5e7eb', padding:'16px', marginBottom:'14px' }}>
                     <div style={{ fontSize:'13px', fontWeight:'600', color:'#374151', marginBottom:'12px' }}>تفاصيل {MONTHS_AR[selectedMonth-1]} {y}</div>
-                    <div style={{ display:'grid', gridTemplateColumns:'repeat(3,1fr)', gap:'10px' }}>
+                    <div style={{ display:'grid', gridTemplateColumns:'repeat(4,1fr)', gap:'10px' }}>
                       {[
-                        { label:'إيجار شهري', val:filteredReports[0]?.monthlyRevenue||0, color:'#1e40af', bg:'#dbeafe' },
-                        { label:'مفروشة',      val:filteredReports[0]?.furnishedRevenue||0, color:'#065f46', bg:'#d1fae5' },
-                        { label:'مصاريف',      val:filteredReports[0]?.totalExpenses||0, color:'#dc2626', bg:'#fee2e2' },
+                        { label:'إيجار شهري',    val:filteredReports[0]?.monthlyRevenue||0, color:'#1e40af', bg:'#dbeafe' },
+                        { label:'مفروشة',        val:filteredReports[0]?.furnishedRevenue||0, color:'#065f46', bg:'#d1fae5' },
+                        { label:'إيرادات أخرى',  val:filteredReports[0]?.otherRevenue||0, color:'#9A7D0A', bg:'#fef9e7' },
+                        { label:'مصاريف',        val:filteredReports[0]?.totalExpenses||0, color:'#dc2626', bg:'#fee2e2' },
                       ].map(k=>(
                         <div key={k.label} style={{ background:k.bg, borderRadius:'10px', padding:'12px', textAlign:'center' }}>
                           <div style={{ fontSize:'16px', fontWeight:'700', color:k.color }}>{fmt(k.val)} ر.س</div>
@@ -515,7 +521,7 @@ export default function ReportsPage() {
                   <div style={{ overflowX:'auto' }}>
                     <table style={{ width:'100%', borderCollapse:'collapse', fontSize:'12px' }}>
                       <thead style={{ background:'#f9fafb' }}>
-                        <tr>{['الشهر','إيجار شهري','مفروش','إجمالي','مصاريف','صافي','هامش'].map(h=>(
+                        <tr>{['الشهر','إيجار شهري','مفروش','إيرادات أخرى','إجمالي','مصاريف','صافي','هامش'].map(h=>(
                           <th key={h} style={{ padding:'9px 12px', textAlign:'right', color:'#6b7280', fontWeight:'500', borderBottom:'1px solid #e5e7eb', whiteSpace:'nowrap' }}>{h}</th>
                         ))}</tr>
                       </thead>
@@ -525,6 +531,7 @@ export default function ReportsPage() {
                             <td style={{ padding:'9px 12px', fontWeight:'600', color:'#374151' }}>{MONTHS_AR[r.month-1]}</td>
                             <td style={{ padding:'9px 12px' }}>{r.monthlyRevenue>0?fmt(r.monthlyRevenue):'—'}</td>
                             <td style={{ padding:'9px 12px' }}>{r.furnishedRevenue>0?fmt(r.furnishedRevenue):'—'}</td>
+                            <td style={{ padding:'9px 12px' }}>{r.otherRevenue>0?fmt(r.otherRevenue):'—'}</td>
                             <td style={{ padding:'9px 12px', fontWeight:'600' }}>{r.totalRevenue>0?fmt(r.totalRevenue):'—'}</td>
                             <td style={{ padding:'9px 12px', color:'#dc2626' }}>{r.totalExpenses>0?fmt(r.totalExpenses):'—'}</td>
                             <td style={{ padding:'9px 12px', fontWeight:'600' }}>
@@ -542,8 +549,8 @@ export default function ReportsPage() {
                       </tbody>
                       <tfoot>
                         <tr style={{ background:'#1B4F72' }}>
-                          {['المجموع',fmt(filteredReports.reduce((s,r)=>s+r.monthlyRevenue,0)),fmt(filteredReports.reduce((s,r)=>s+r.furnishedRevenue,0)),fmt(yearTotals.revenue),fmt(yearTotals.expenses),fmt(yearTotals.profit),yearTotals.revenue>0?fmtPct(yearTotals.profit/yearTotals.revenue*100):'—'].map((v,i)=>(
-                            <td key={i} style={{ padding:'10px 12px', color:i===4?'#fca5a5':i===5?'#6ee7b7':'#fff', fontWeight:'600' }}>{v}</td>
+                          {['المجموع',fmt(filteredReports.reduce((s,r)=>s+r.monthlyRevenue,0)),fmt(filteredReports.reduce((s,r)=>s+r.furnishedRevenue,0)),fmt(filteredReports.reduce((s,r)=>s+r.otherRevenue,0)),fmt(yearTotals.revenue),fmt(yearTotals.expenses),fmt(yearTotals.profit),yearTotals.revenue>0?fmtPct(yearTotals.profit/yearTotals.revenue*100):'—'].map((v,i)=>(
+                            <td key={i} style={{ padding:'10px 12px', color:i===5?'#fca5a5':i===6?'#6ee7b7':'#fff', fontWeight:'600' }}>{v}</td>
                           ))}
                         </tr>
                       </tfoot>
