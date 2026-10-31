@@ -1,7 +1,7 @@
 'use client';
 import { useEffect, useState } from 'react';
 import { db } from '../../lib/firebase';
-import { collection, getDocs, addDoc, updateDoc, doc, query, where, serverTimestamp } from 'firebase/firestore';
+import { collection, getDocs, addDoc, updateDoc, setDoc, doc, query, where, serverTimestamp } from 'firebase/firestore';
 import { useRouter } from 'next/navigation';
 import { useAuth } from '../../context/AuthContext';
 
@@ -34,6 +34,9 @@ export default function UnitsPage() {
   const [userRole, setUserRole] = useState('');
   const [deleteRequest, setDeleteRequest] = useState<Unit | null>(null);
   const [showDeleted, setShowDeleted] = useState(false);
+  const [orphanedUnits, setOrphanedUnits] = useState<{ unitId: string; unitNumber: string; rentAmount: number; tenantName: string }[] | null>(null);
+  const [checkingOrphans, setCheckingOrphans] = useState(false);
+  const [restoringOrphan, setRestoringOrphan] = useState<string | null>(null);
 
   const [form, setForm] = useState({ unitNumber: '', type: 'monthly', status: 'vacant', floor: '', rooms: '', basePrice: '', notes: '' });
   const [propForm, setPropForm] = useState({ name: '', address: '', city: 'جدة', totalUnits: '' });
@@ -124,6 +127,53 @@ export default function UnitsPage() {
     if (!canDeleteUnit) return;
     await updateDoc(doc(db, 'units', id), { deleted: false, deletedAt: null });
     await loadUnits(activePropertyId);
+  };
+
+  // ─── وحدات مفقودة (حُذفت نهائياً قبل إضافة الحذف الناعم) ──────────────
+  // حذف الوحدة (قديماً) لم يكن يحذف مستأجريها ودفعاتها، فتبقى هذي السجلات
+  // تشير لمعرّف وحدة (unitId) لم يعد له مستند في جدول units — نكتشفها هنا
+  // ونعيد إنشاء مستند الوحدة بنفس المعرّف القديم حتى يرتبط كل شيء تلقائياً
+  const checkOrphanedUnits = async () => {
+    if (!canDeleteUnit || !activePropertyId) return;
+    setCheckingOrphans(true);
+    try {
+      const tSnap = await getDocs(query(collection(db, 'tenants'), where('propertyId', '==', activePropertyId)));
+      const knownUnitIds = new Set(units.map(u => u.id));
+      const found = new Map<string, { unitId: string; unitNumber: string; rentAmount: number; tenantName: string }>();
+      tSnap.docs.forEach(d => {
+        const t = d.data() as any;
+        if (!t.unitId || knownUnitIds.has(t.unitId) || found.has(t.unitId)) return;
+        found.set(t.unitId, {
+          unitId: t.unitId,
+          unitNumber: t.unitNumber || '—',
+          rentAmount: t.rentAmount || 0,
+          tenantName: t.name || '—',
+        });
+      });
+      setOrphanedUnits(Array.from(found.values()));
+    } catch (e: any) {
+      alert('حدث خطأ أثناء الفحص: ' + e.message);
+    }
+    setCheckingOrphans(false);
+  };
+
+  const restoreOrphanedUnit = async (o: { unitId: string; unitNumber: string; rentAmount: number }) => {
+    if (!canDeleteUnit) return;
+    setRestoringOrphan(o.unitId);
+    try {
+      // نعيد إنشاء الوحدة بنفس المعرّف القديم بالضبط، حتى يرتبط بها تلقائياً كل
+      // ما كان مرتبطاً به سابقاً (المستأجرون، الدفعات، التقارير، التدفق النقدي)
+      await setDoc(doc(db, 'units', o.unitId), {
+        unitNumber: o.unitNumber, type: 'monthly', status: 'vacant',
+        floor: 0, rooms: 0, basePrice: o.rentAmount || 0,
+        propertyId: activePropertyId, createdAt: serverTimestamp(),
+      });
+      await loadUnits(activePropertyId);
+      setOrphanedUnits(prev => prev ? prev.filter(x => x.unitId !== o.unitId) : prev);
+    } catch (e: any) {
+      alert('حدث خطأ أثناء الاستعادة: ' + e.message);
+    }
+    setRestoringOrphan(null);
   };
 
   const saveProperty = async () => {
@@ -341,6 +391,54 @@ export default function UnitsPage() {
                   </tbody>
                 </table>
               </div>
+            )}
+          </div>
+        )}
+
+        {/* Orphaned units (deleted permanently before soft-delete existed) */}
+        {canDeleteUnit && (
+          <div style={{ marginTop: '20px' }}>
+            <button onClick={checkOrphanedUnits} disabled={checkingOrphans}
+              style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '8px 14px', background: '#fff', border: '1px solid #e5e7eb', borderRadius: '10px', cursor: checkingOrphans ? 'default' : 'pointer', fontSize: '13px', color: '#6b7280', opacity: checkingOrphans ? 0.6 : 1 }}>
+              🔍 {checkingOrphans ? 'جارٍ الفحص...' : 'فحص الوحدات المفقودة'}
+            </button>
+
+            {orphanedUnits !== null && (
+              orphanedUnits.length === 0 ? (
+                <div style={{ marginTop: '10px', padding: '10px 14px', background: '#d1fae5', borderRadius: '10px', fontSize: '13px', color: '#065f46' }}>
+                  ✅ ما فيه وحدات مفقودة — كل الوحدات المرتبطة بمستأجرين موجودة.
+                </div>
+              ) : (
+                <div style={{ background: '#fff', borderRadius: '14px', border: '1px solid #fca5a5', overflow: 'hidden', marginTop: '10px' }}>
+                  <div style={{ padding: '10px 14px', background: '#fef2f2', fontSize: '12px', color: '#991b1b' }}>
+                    ⚠️ هذي وحدات حُذفت نهائياً (قبل إضافة الحذف الناعم) لكن لسا مرتبط فيها مستأجرون ودفعات — الاستعادة تنشئ الوحدة من جديد بنفس الرقم حتى يرتبط بها تاريخها تلقائياً.
+                  </div>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
+                    <thead>
+                      <tr style={{ background: '#f9fafb' }}>
+                        {['رقم الوحدة', 'آخر مستأجر', 'الإيجار', 'إجراءات'].map(h => (
+                          <th key={h} style={{ padding: '10px 14px', textAlign: 'right', color: '#6b7280', fontWeight: '500', borderBottom: '1px solid #e5e7eb' }}>{h}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {orphanedUnits.map((o, i) => (
+                        <tr key={o.unitId} style={{ borderBottom: i < orphanedUnits.length - 1 ? '1px solid #f3f4f6' : 'none' }}>
+                          <td style={{ padding: '10px 14px', fontWeight: '700', color: '#dc2626' }}>{o.unitNumber}</td>
+                          <td style={{ padding: '10px 14px', color: '#374151' }}>{o.tenantName}</td>
+                          <td style={{ padding: '10px 14px', color: '#6b7280' }}>{o.rentAmount ? o.rentAmount.toLocaleString('ar-SA') + ' ر.س' : '—'}</td>
+                          <td style={{ padding: '10px 14px' }}>
+                            <button onClick={() => restoreOrphanedUnit(o)} disabled={restoringOrphan === o.unitId}
+                              style={{ padding: '4px 10px', border: '1px solid #86efac', borderRadius: '6px', background: '#fff', cursor: restoringOrphan === o.unitId ? 'default' : 'pointer', fontSize: '12px', color: '#16a34a', opacity: restoringOrphan === o.unitId ? 0.6 : 1 }}>
+                              {restoringOrphan === o.unitId ? 'جارٍ...' : '↩️ استعادة'}
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )
             )}
           </div>
         )}
