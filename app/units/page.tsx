@@ -132,24 +132,44 @@ export default function UnitsPage() {
   // ─── وحدات مفقودة (حُذفت نهائياً قبل إضافة الحذف الناعم) ──────────────
   // حذف الوحدة (قديماً) لم يكن يحذف مستأجريها ودفعاتها، فتبقى هذي السجلات
   // تشير لمعرّف وحدة (unitId) لم يعد له مستند في جدول units — نكتشفها هنا
-  // ونعيد إنشاء مستند الوحدة بنفس المعرّف القديم حتى يرتبط كل شيء تلقائياً
+  // ونعيد إنشاء مستند الوحدة بنفس المعرّف القديم حتى يرتبط كل شيء تلقائياً.
+  // نفحص tenants و rentPayments معاً، لأن المستأجر نفسه قد يكون انحذف هو
+  // الآخر (حذف "قديم" لم يكن يحذف الدفعات)، فلا يبقى أثر للوحدة إلا في الدفعات
   const checkOrphanedUnits = async () => {
     if (!canDeleteUnit || !activePropertyId) return;
     setCheckingOrphans(true);
     try {
-      const tSnap = await getDocs(query(collection(db, 'tenants'), where('propertyId', '==', activePropertyId)));
+      const [tSnap, pSnap] = await Promise.all([
+        getDocs(query(collection(db, 'tenants'), where('propertyId', '==', activePropertyId))),
+        getDocs(query(collection(db, 'rentPayments'), where('propertyId', '==', activePropertyId))),
+      ]);
       const knownUnitIds = new Set(units.map(u => u.id));
       const found = new Map<string, { unitId: string; unitNumber: string; rentAmount: number; tenantName: string }>();
+
       tSnap.docs.forEach(d => {
         const t = d.data() as any;
-        if (!t.unitId || knownUnitIds.has(t.unitId) || found.has(t.unitId)) return;
+        if (!t.unitId || knownUnitIds.has(t.unitId)) return;
+        const existing = found.get(t.unitId);
         found.set(t.unitId, {
           unitId: t.unitId,
-          unitNumber: t.unitNumber || '—',
-          rentAmount: t.rentAmount || 0,
-          tenantName: t.name || '—',
+          unitNumber: t.unitNumber || existing?.unitNumber || '—',
+          rentAmount: Math.max(t.rentAmount || 0, existing?.rentAmount || 0),
+          tenantName: t.name || existing?.tenantName || '—',
         });
       });
+
+      pSnap.docs.forEach(d => {
+        const p = d.data() as any;
+        if (!p.unitId || knownUnitIds.has(p.unitId)) return;
+        const existing = found.get(p.unitId);
+        found.set(p.unitId, {
+          unitId: p.unitId,
+          unitNumber: p.unitNumber || existing?.unitNumber || '—',
+          rentAmount: Math.max(p.amountDue || 0, existing?.rentAmount || 0),
+          tenantName: existing?.tenantName || p.tenantName || '—',
+        });
+      });
+
       setOrphanedUnits(Array.from(found.values()));
     } catch (e: any) {
       alert('حدث خطأ أثناء الفحص: ' + e.message);
@@ -406,7 +426,7 @@ export default function UnitsPage() {
             {orphanedUnits !== null && (
               orphanedUnits.length === 0 ? (
                 <div style={{ marginTop: '10px', padding: '10px 14px', background: '#d1fae5', borderRadius: '10px', fontSize: '13px', color: '#065f46' }}>
-                  ✅ ما فيه وحدات مفقودة — كل الوحدات المرتبطة بمستأجرين موجودة.
+                  ✅ ما فيه وحدات مفقودة — كل الوحدات المرتبطة بمستأجرين أو دفعات موجودة.
                 </div>
               ) : (
                 <div style={{ background: '#fff', borderRadius: '14px', border: '1px solid #fca5a5', overflow: 'hidden', marginTop: '10px' }}>
