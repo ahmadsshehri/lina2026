@@ -1,7 +1,7 @@
 'use client';
 import { useEffect, useState } from 'react';
 import { db } from '../../lib/firebase';
-import { collection, getDocs, addDoc, updateDoc, setDoc, doc, query, where, serverTimestamp } from 'firebase/firestore';
+import { collection, getDocs, addDoc, updateDoc, setDoc, doc, query, where, serverTimestamp, Timestamp } from 'firebase/firestore';
 import { useRouter } from 'next/navigation';
 import { useAuth } from '../../context/AuthContext';
 
@@ -13,6 +13,8 @@ interface Unit {
   deleted?: boolean; deletedAt?: any;
 }
 interface Property { id: string; name: string; }
+interface OrphanTenant { tenantId: string; name: string; rentAmount: number; firstPaid: Date | null; lastPaid: Date | null; }
+interface OrphanUnit { unitId: string; unitNumber: string; rentAmount: number; tenantName: string; missingTenants: OrphanTenant[]; }
 
 const TYPE_LABEL: Record<string, string> = { monthly: 'شهري', furnished: 'مفروش', owner: 'خاصة' };
 const STATUS_LABEL: Record<string, string> = { occupied: 'مشغول', vacant: 'شاغر', maintenance: 'صيانة' };
@@ -34,7 +36,7 @@ export default function UnitsPage() {
   const [userRole, setUserRole] = useState('');
   const [deleteRequest, setDeleteRequest] = useState<Unit | null>(null);
   const [showDeleted, setShowDeleted] = useState(false);
-  const [orphanedUnits, setOrphanedUnits] = useState<{ unitId: string; unitNumber: string; rentAmount: number; tenantName: string }[] | null>(null);
+  const [orphanedUnits, setOrphanedUnits] = useState<OrphanUnit[] | null>(null);
   const [checkingOrphans, setCheckingOrphans] = useState(false);
   const [restoringOrphan, setRestoringOrphan] = useState<string | null>(null);
 
@@ -144,7 +146,11 @@ export default function UnitsPage() {
         getDocs(query(collection(db, 'rentPayments'), where('propertyId', '==', activePropertyId))),
       ]);
       const knownUnitIds = new Set(units.map(u => u.id));
+      const knownTenantIds = new Set(tSnap.docs.map(d => d.id));
       const found = new Map<string, { unitId: string; unitNumber: string; rentAmount: number; tenantName: string }>();
+      // الوحدة → (المستأجر المفقود ← بياناته): مستأجرون انحذفوا هم الآخرون، ولا
+      // يبقى أثرهم إلا في سجلات الدفعات نفسها
+      const missingTenantsByUnit = new Map<string, Map<string, OrphanTenant>>();
 
       tSnap.docs.forEach(d => {
         const t = d.data() as any;
@@ -168,16 +174,34 @@ export default function UnitsPage() {
           rentAmount: Math.max(p.amountDue || 0, existing?.rentAmount || 0),
           tenantName: existing?.tenantName || p.tenantName || '—',
         });
+
+        if (p.tenantId && !knownTenantIds.has(p.tenantId)) {
+          if (!missingTenantsByUnit.has(p.unitId)) missingTenantsByUnit.set(p.unitId, new Map());
+          const tMap = missingTenantsByUnit.get(p.unitId)!;
+          const pd = p.paidDate?.toDate ? p.paidDate.toDate() : (p.paidDate ? new Date(p.paidDate) : null);
+          const ex = tMap.get(p.tenantId);
+          tMap.set(p.tenantId, {
+            tenantId: p.tenantId,
+            name: p.tenantName || ex?.name || '—',
+            rentAmount: Math.max(p.amountDue || 0, ex?.rentAmount || 0),
+            firstPaid: pd && (!ex?.firstPaid || pd < ex.firstPaid) ? pd : (ex?.firstPaid || pd),
+            lastPaid:  pd && (!ex?.lastPaid  || pd > ex.lastPaid)  ? pd : (ex?.lastPaid  || pd),
+          });
+        }
       });
 
-      setOrphanedUnits(Array.from(found.values()));
+      const result: OrphanUnit[] = Array.from(found.entries()).map(([unitId, info]) => ({
+        unitId, ...info,
+        missingTenants: Array.from((missingTenantsByUnit.get(unitId) || new Map()).values()),
+      }));
+      setOrphanedUnits(result);
     } catch (e: any) {
       alert('حدث خطأ أثناء الفحص: ' + e.message);
     }
     setCheckingOrphans(false);
   };
 
-  const restoreOrphanedUnit = async (o: { unitId: string; unitNumber: string; rentAmount: number }) => {
+  const restoreOrphanedUnit = async (o: OrphanUnit) => {
     if (!canDeleteUnit) return;
     setRestoringOrphan(o.unitId);
     try {
@@ -188,6 +212,25 @@ export default function UnitsPage() {
         floor: 0, rooms: 0, basePrice: o.rentAmount || 0,
         propertyId: activePropertyId, createdAt: serverTimestamp(),
       });
+
+      // التقارير وجدول الإيجار الشهري تربط الدفعات عبر المستأجر لا الوحدة،
+      // فنعيد أيضاً أي مستأجر مرتبط بالوحدة انحذف هو الآخر، بنفس معرّفه القديم،
+      // حتى يرتبط بدفعاته تلقائياً ويظهر تاريخه من جديد. تواريخ العقد هنا تقدير
+      // (من أول وآخر دفعة له) ويُفضّل مراجعتها بعد الاستعادة.
+      for (const t of o.missingTenants) {
+        const start = t.firstPaid ? new Date(t.firstPaid.getFullYear(), t.firstPaid.getMonth(), 1) : null;
+        const end   = t.lastPaid   ? new Date(t.lastPaid.getFullYear(), t.lastPaid.getMonth() + 1, 0) : null;
+        await setDoc(doc(db, 'tenants', t.tenantId), {
+          name: t.name, unitId: o.unitId, unitNumber: o.unitNumber,
+          propertyId: activePropertyId, rentAmount: t.rentAmount || o.rentAmount || 0,
+          paymentCycle: 'monthly', status: 'expired',
+          contractStart: start ? Timestamp.fromDate(start) : null,
+          contractEnd: end ? Timestamp.fromDate(end) : null,
+          phone: '', idNumber: '', contractNumber: '',
+          createdAt: serverTimestamp(),
+        });
+      }
+
       await loadUnits(activePropertyId);
       setOrphanedUnits(prev => prev ? prev.filter(x => x.unitId !== o.unitId) : prev);
     } catch (e: any) {
@@ -431,7 +474,7 @@ export default function UnitsPage() {
               ) : (
                 <div style={{ background: '#fff', borderRadius: '14px', border: '1px solid #fca5a5', overflow: 'hidden', marginTop: '10px' }}>
                   <div style={{ padding: '10px 14px', background: '#fef2f2', fontSize: '12px', color: '#991b1b' }}>
-                    ⚠️ هذي وحدات حُذفت نهائياً (قبل إضافة الحذف الناعم) لكن لسا مرتبط فيها مستأجرون ودفعات — الاستعادة تنشئ الوحدة من جديد بنفس الرقم حتى يرتبط بها تاريخها تلقائياً.
+                    ⚠️ هذي وحدات حُذفت نهائياً (قبل إضافة الحذف الناعم) لكن لسا مرتبط فيها مستأجرون ودفعات — الاستعادة تنشئ الوحدة من جديد بنفس الرقم، وتعيد أيضاً أي مستأجر مرتبط فيها انحذف هو الآخر (بنفس معرّفه) حتى يرتبط بدفعاته ويظهر تاريخه في التقارير وجدول الإيجار من جديد. تواريخ العقد المُعادة تقديرية (من أول وآخر دفعة)، راجعها بعد الاستعادة.
                   </div>
                   <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
                     <thead>
@@ -445,7 +488,14 @@ export default function UnitsPage() {
                       {orphanedUnits.map((o, i) => (
                         <tr key={o.unitId} style={{ borderBottom: i < orphanedUnits.length - 1 ? '1px solid #f3f4f6' : 'none' }}>
                           <td style={{ padding: '10px 14px', fontWeight: '700', color: '#dc2626' }}>{o.unitNumber}</td>
-                          <td style={{ padding: '10px 14px', color: '#374151' }}>{o.tenantName}</td>
+                          <td style={{ padding: '10px 14px', color: '#374151' }}>
+                            {o.tenantName}
+                            {o.missingTenants.length > 0 && (
+                              <div style={{ fontSize: '10px', color: '#991b1b', marginTop: '2px' }}>
+                                + استعادة {o.missingTenants.length} مستأجر محذوف
+                              </div>
+                            )}
+                          </td>
                           <td style={{ padding: '10px 14px', color: '#6b7280' }}>{o.rentAmount ? o.rentAmount.toLocaleString('ar-SA') + ' ر.س' : '—'}</td>
                           <td style={{ padding: '10px 14px' }}>
                             <button onClick={() => restoreOrphanedUnit(o)} disabled={restoringOrphan === o.unitId}
