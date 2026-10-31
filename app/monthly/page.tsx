@@ -13,7 +13,7 @@ import { useAuth } from '../../context/AuthContext';
 // ─── Types ────────────────────────────────────────────────────────────────────
 interface Unit {
   id: string; unitNumber: string; type: string;
-  status: string; basePrice: number;
+  status: string; basePrice: number; deleted?: boolean;
 }
 interface Tenant {
   id: string; propertyId: string; unitId: string; unitNumber: string;
@@ -187,7 +187,7 @@ export default function MonthlyPage() {
   const formerTenants   = tenants.filter(t => t.status !== 'active');
   const expiringTenants = activeTenants.filter(t => { const d = daysUntil(t.contractEnd); return d >= 0 && d <= 30; });
   const expiredTenants  = activeTenants.filter(t => daysUntil(t.contractEnd) < 0);
-  const availableUnits  = units.filter(u => u.type !== 'furnished' && (u.status === 'vacant' || (editTenant && u.id === editTenant.unitId)));
+  const availableUnits  = units.filter(u => !u.deleted && u.type !== 'furnished' && (u.status === 'vacant' || (editTenant && u.id === editTenant.unitId)));
 
   const filteredActiveTenants = useMemo(() => {
     return activeTenants.filter(t => {
@@ -500,10 +500,10 @@ export default function MonthlyPage() {
               </div>
             )}
           </div>
-          {units.filter(u => u.type !== 'furnished' && u.status === 'occupied').length > 0 && (
+          {units.filter(u => !u.deleted && u.type !== 'furnished' && u.status === 'occupied').length > 0 && (
             <div style={{ display:'flex', gap:'6px', flexWrap:'wrap' }}>
               <span style={{ fontSize:'11px', color:'#9ca3af', alignSelf:'center', whiteSpace:'nowrap' }}>شقة:</span>
-              {units.filter(u => u.type !== 'furnished' && u.status === 'occupied')
+              {units.filter(u => !u.deleted && u.type !== 'furnished' && u.status === 'occupied')
                 .sort((a,b) => a.unitNumber.localeCompare(b.unitNumber, undefined, { numeric:true }))
                 .map(u => (
                   <button key={u.id} onClick={() => setSearchQuery(searchQuery === u.unitNumber ? '' : u.unitNumber)}
@@ -535,11 +535,11 @@ export default function MonthlyPage() {
         {tab === 'active' && (
           <>
             {/* ── Unit Status Grid ── */}
-            {units.filter(u => u.type !== 'furnished').length > 0 && (
+            {units.filter(u => !u.deleted && u.type !== 'furnished').length > 0 && (
               <div style={{ background:'#fff', borderRadius:'16px', border:'1px solid #e5e7eb', padding:'14px 16px', marginBottom:'14px' }}>
                 <div style={{ fontSize:'12px', fontWeight:'600', color:'#6b7280', marginBottom:'10px' }}>نظرة عامة على الوحدات</div>
                 <div style={{ display:'flex', gap:'6px', flexWrap:'wrap' }}>
-                  {units.filter(u => u.type !== 'furnished')
+                  {units.filter(u => !u.deleted && u.type !== 'furnished')
                     .sort((a,b) => a.unitNumber.localeCompare(b.unitNumber, undefined, { numeric:true }))
                     .map(u => {
                       const tenant = activeTenants.find(t => t.unitId === u.id);
