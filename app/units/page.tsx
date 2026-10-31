@@ -14,7 +14,7 @@ interface Unit {
 }
 interface Property { id: string; name: string; }
 interface OrphanTenant { tenantId: string; name: string; rentAmount: number; firstPaid: Date | null; lastPaid: Date | null; }
-interface OrphanUnit { unitId: string; unitNumber: string; rentAmount: number; tenantName: string; missingTenants: OrphanTenant[]; }
+interface OrphanUnit { unitId: string; unitNumber: string; rentAmount: number; tenantName: string; unitMissing: boolean; missingTenants: OrphanTenant[]; }
 
 const TYPE_LABEL: Record<string, string> = { monthly: 'شهري', furnished: 'مفروش', owner: 'خاصة' };
 const STATUS_LABEL: Record<string, string> = { occupied: 'مشغول', vacant: 'شاغر', maintenance: 'صيانة' };
@@ -131,12 +131,12 @@ export default function UnitsPage() {
     await loadUnits(activePropertyId);
   };
 
-  // ─── وحدات مفقودة (حُذفت نهائياً قبل إضافة الحذف الناعم) ──────────────
-  // حذف الوحدة (قديماً) لم يكن يحذف مستأجريها ودفعاتها، فتبقى هذي السجلات
-  // تشير لمعرّف وحدة (unitId) لم يعد له مستند في جدول units — نكتشفها هنا
-  // ونعيد إنشاء مستند الوحدة بنفس المعرّف القديم حتى يرتبط كل شيء تلقائياً.
-  // نفحص tenants و rentPayments معاً، لأن المستأجر نفسه قد يكون انحذف هو
-  // الآخر (حذف "قديم" لم يكن يحذف الدفعات)، فلا يبقى أثر للوحدة إلا في الدفعات
+  // ─── وحدات/مستأجرون مفقودون (حُذفوا نهائياً قبل إضافة الحذف الناعم) ──
+  // حذف الوحدة أو المستأجر (قديماً) لم يكن يحذف الدفعات المرتبطة، فتبقى هذي
+  // السجلات تشير لمعرّفات لم يعد لها مستند — نكتشفها هنا ونعيد إنشاءها بنفس
+  // المعرّف القديم حتى يرتبط كل شيء تلقائياً. الحالتان مستقلتان عن بعض: قد
+  // تكون الوحدة موجودة والمستأجر فقط هو المفقود (مثلاً بعد استعادة الوحدة في
+  // مرة سابقة)، فلا نربط اكتشاف المستأجر المفقود بكون الوحدة نفسها مفقودة.
   const checkOrphanedUnits = async () => {
     if (!canDeleteUnit || !activePropertyId) return;
     setCheckingOrphans(true);
@@ -147,9 +147,8 @@ export default function UnitsPage() {
       ]);
       const knownUnitIds = new Set(units.map(u => u.id));
       const knownTenantIds = new Set(tSnap.docs.map(d => d.id));
-      const found = new Map<string, { unitId: string; unitNumber: string; rentAmount: number; tenantName: string }>();
-      // الوحدة → (المستأجر المفقود ← بياناته): مستأجرون انحذفوا هم الآخرون، ولا
-      // يبقى أثرهم إلا في سجلات الدفعات نفسها
+      const found = new Map<string, { unitId: string; unitNumber: string; rentAmount: number; tenantName: string; unitMissing: boolean }>();
+      // الوحدة → (المستأجر المفقود ← بياناته)
       const missingTenantsByUnit = new Map<string, Map<string, OrphanTenant>>();
 
       tSnap.docs.forEach(d => {
@@ -161,21 +160,39 @@ export default function UnitsPage() {
           unitNumber: t.unitNumber || existing?.unitNumber || '—',
           rentAmount: Math.max(t.rentAmount || 0, existing?.rentAmount || 0),
           tenantName: t.name || existing?.tenantName || '—',
+          unitMissing: true,
         });
       });
 
       pSnap.docs.forEach(d => {
         const p = d.data() as any;
-        if (!p.unitId || knownUnitIds.has(p.unitId)) return;
-        const existing = found.get(p.unitId);
-        found.set(p.unitId, {
-          unitId: p.unitId,
-          unitNumber: p.unitNumber || existing?.unitNumber || '—',
-          rentAmount: Math.max(p.amountDue || 0, existing?.rentAmount || 0),
-          tenantName: existing?.tenantName || p.tenantName || '—',
-        });
+        if (!p.unitId) return;
+        const unitMissing = !knownUnitIds.has(p.unitId);
+        const tenantMissing = !!p.tenantId && !knownTenantIds.has(p.tenantId);
+        if (!unitMissing && !tenantMissing) return; // هذي الدفعة سليمة تماماً
 
-        if (p.tenantId && !knownTenantIds.has(p.tenantId)) {
+        if (unitMissing) {
+          const existing = found.get(p.unitId);
+          found.set(p.unitId, {
+            unitId: p.unitId,
+            unitNumber: p.unitNumber || existing?.unitNumber || '—',
+            rentAmount: Math.max(p.amountDue || 0, existing?.rentAmount || 0),
+            tenantName: existing?.tenantName || p.tenantName || '—',
+            unitMissing: true,
+          });
+        } else if (!found.has(p.unitId)) {
+          // الوحدة موجودة فعلاً، لكن سجّلها هنا حتى نعرض صفاً لمستأجرها المفقود
+          const u = units.find(x => x.id === p.unitId);
+          found.set(p.unitId, {
+            unitId: p.unitId,
+            unitNumber: p.unitNumber || u?.unitNumber || '—',
+            rentAmount: p.amountDue || 0,
+            tenantName: p.tenantName || '—',
+            unitMissing: false,
+          });
+        }
+
+        if (tenantMissing) {
           if (!missingTenantsByUnit.has(p.unitId)) missingTenantsByUnit.set(p.unitId, new Map());
           const tMap = missingTenantsByUnit.get(p.unitId)!;
           const pd = p.paidDate?.toDate ? p.paidDate.toDate() : (p.paidDate ? new Date(p.paidDate) : null);
@@ -205,13 +222,16 @@ export default function UnitsPage() {
     if (!canDeleteUnit) return;
     setRestoringOrphan(o.unitId);
     try {
-      // نعيد إنشاء الوحدة بنفس المعرّف القديم بالضبط، حتى يرتبط بها تلقائياً كل
-      // ما كان مرتبطاً به سابقاً (المستأجرون، الدفعات، التقارير، التدفق النقدي)
-      await setDoc(doc(db, 'units', o.unitId), {
-        unitNumber: o.unitNumber, type: 'monthly', status: 'vacant',
-        floor: 0, rooms: 0, basePrice: o.rentAmount || 0,
-        propertyId: activePropertyId, createdAt: serverTimestamp(),
-      });
+      // نعيد إنشاء الوحدة بنفس المعرّف القديم بالضبط فقط إن كانت هي نفسها
+      // مفقودة — إن كانت موجودة أصلاً (مثلاً استُعيدت سابقاً) لا نكتب فوقها
+      // حتى لا نفقد أي تعديل عليها، ونكتفي باستعادة المستأجر المفقود فقط
+      if (o.unitMissing) {
+        await setDoc(doc(db, 'units', o.unitId), {
+          unitNumber: o.unitNumber, type: 'monthly', status: 'vacant',
+          floor: 0, rooms: 0, basePrice: o.rentAmount || 0,
+          propertyId: activePropertyId, createdAt: serverTimestamp(),
+        });
+      }
 
       // التقارير وجدول الإيجار الشهري تربط الدفعات عبر المستأجر لا الوحدة،
       // فنعيد أيضاً أي مستأجر مرتبط بالوحدة انحذف هو الآخر، بنفس معرّفه القديم،
@@ -474,7 +494,7 @@ export default function UnitsPage() {
               ) : (
                 <div style={{ background: '#fff', borderRadius: '14px', border: '1px solid #fca5a5', overflow: 'hidden', marginTop: '10px' }}>
                   <div style={{ padding: '10px 14px', background: '#fef2f2', fontSize: '12px', color: '#991b1b' }}>
-                    ⚠️ هذي وحدات حُذفت نهائياً (قبل إضافة الحذف الناعم) لكن لسا مرتبط فيها مستأجرون ودفعات — الاستعادة تنشئ الوحدة من جديد بنفس الرقم، وتعيد أيضاً أي مستأجر مرتبط فيها انحذف هو الآخر (بنفس معرّفه) حتى يرتبط بدفعاته ويظهر تاريخه في التقارير وجدول الإيجار من جديد. تواريخ العقد المُعادة تقديرية (من أول وآخر دفعة)، راجعها بعد الاستعادة.
+                    ⚠️ هذي وحدات أو مستأجرون حُذفوا نهائياً (قبل إضافة الحذف الناعم) لكن لسا مرتبط فيهم دفعات — "الوحدة موجودة" يعني المستأجر فقط هو المفقود. الاستعادة تنشئ الوحدة من جديد إن كانت مفقودة، وتعيد أي مستأجر انحذف (بنفس معرّفه) حتى يرتبط بدفعاته ويظهر تاريخه في التقارير وجدول الإيجار من جديد. تواريخ العقد المُعادة تقديرية (من أول وآخر دفعة)، راجعها بعد الاستعادة.
                   </div>
                   <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
                     <thead>
@@ -487,7 +507,12 @@ export default function UnitsPage() {
                     <tbody>
                       {orphanedUnits.map((o, i) => (
                         <tr key={o.unitId} style={{ borderBottom: i < orphanedUnits.length - 1 ? '1px solid #f3f4f6' : 'none' }}>
-                          <td style={{ padding: '10px 14px', fontWeight: '700', color: '#dc2626' }}>{o.unitNumber}</td>
+                          <td style={{ padding: '10px 14px', fontWeight: '700', color: o.unitMissing ? '#dc2626' : '#d97706' }}>
+                            {o.unitNumber}
+                            {!o.unitMissing && (
+                              <div style={{ fontSize: '10px', color: '#9ca3af', fontWeight: '400' }}>الوحدة موجودة</div>
+                            )}
+                          </td>
                           <td style={{ padding: '10px 14px', color: '#374151' }}>
                             {o.tenantName}
                             {o.missingTenants.length > 0 && (
