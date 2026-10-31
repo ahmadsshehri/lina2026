@@ -126,7 +126,7 @@ export default function HomePage() {
       getDocs(query(collection(db, 'bookings'), where('propertyId', '==', pid))),
     ]);
     setStats({
-      units:    uSnap.size,
+      units:    uSnap.docs.filter(d => !(d.data() as any).deleted).length,
       tenants:  tSnap.size,
       bookings: bSnap.docs.filter(d => {
         const s = (d.data() as any).status;

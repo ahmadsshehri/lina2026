@@ -1,7 +1,7 @@
 'use client';
 import { useEffect, useState } from 'react';
 import { db } from '../../lib/firebase';
-import { collection, getDocs, addDoc, updateDoc, deleteDoc, doc, query, where, serverTimestamp } from 'firebase/firestore';
+import { collection, getDocs, addDoc, updateDoc, doc, query, where, serverTimestamp } from 'firebase/firestore';
 import { useRouter } from 'next/navigation';
 import { useAuth } from '../../context/AuthContext';
 
@@ -10,6 +10,7 @@ interface Unit {
   type: 'monthly' | 'furnished' | 'owner';
   status: 'occupied' | 'vacant' | 'maintenance';
   floor: number; rooms: number; basePrice: number; propertyId: string;
+  deleted?: boolean; deletedAt?: any;
 }
 interface Property { id: string; name: string; }
 
@@ -32,6 +33,7 @@ export default function UnitsPage() {
   const [saving, setSaving] = useState(false);
   const [userRole, setUserRole] = useState('');
   const [deleteRequest, setDeleteRequest] = useState<Unit | null>(null);
+  const [showDeleted, setShowDeleted] = useState(false);
 
   const [form, setForm] = useState({ unitNumber: '', type: 'monthly', status: 'vacant', floor: '', rooms: '', basePrice: '', notes: '' });
   const [propForm, setPropForm] = useState({ name: '', address: '', city: 'جدة', totalUnits: '' });
@@ -106,14 +108,22 @@ export default function UnitsPage() {
       setDeleteRequest(u);
       return;
     }
-    if (!confirm(`هل أنت متأكد من حذف الوحدة ${u.unitNumber}؟`)) return;
+    if (!confirm(`هل أنت متأكد من حذف الوحدة ${u.unitNumber}؟ (يمكن استعادتها لاحقاً من قسم "الوحدات المحذوفة")`)) return;
     deleteUnitConfirmed(u.id);
   };
 
   const deleteUnitConfirmed = async (id: string) => {
-    await deleteDoc(doc(db, 'units', id));
+    // حذف ناعم: نُبقي مستند الوحدة حتى تبقى بيانات الأشهر السابقة (المستأجرون، الدفعات، التقارير) سليمة،
+    // ونخفيها فقط عن القوائم الحالية — مع إمكانية الاستعادة لاحقاً
+    await updateDoc(doc(db, 'units', id), { deleted: true, deletedAt: serverTimestamp() });
     await loadUnits(activePropertyId);
     setDeleteRequest(null);
+  };
+
+  const restoreUnit = async (id: string) => {
+    if (!canDeleteUnit) return;
+    await updateDoc(doc(db, 'units', id), { deleted: false, deletedAt: null });
+    await loadUnits(activePropertyId);
   };
 
   const saveProperty = async () => {
@@ -132,12 +142,15 @@ export default function UnitsPage() {
     setSaving(false);
   };
 
+  const activeUnits  = units.filter(u => !u.deleted);
+  const deletedUnits = units.filter(u => u.deleted);
+
   const stats = {
-    total: units.length,
-    occupied: units.filter(u => u.status === 'occupied').length,
-    vacant: units.filter(u => u.status === 'vacant').length,
-    monthly: units.filter(u => u.type === 'monthly').length,
-    furnished: units.filter(u => u.type === 'furnished').length,
+    total: activeUnits.length,
+    occupied: activeUnits.filter(u => u.status === 'occupied').length,
+    vacant: activeUnits.filter(u => u.status === 'vacant').length,
+    monthly: activeUnits.filter(u => u.type === 'monthly').length,
+    furnished: activeUnits.filter(u => u.type === 'furnished').length,
   };
 
   if (loading) return (
@@ -218,7 +231,7 @@ export default function UnitsPage() {
             <p>لا يوجد عقار — أضف عقاراً أولاً</p>
             {canAddProperty && <button onClick={() => setShowPropModal(true)} style={btnPrimary}>+ إضافة عقار</button>}
           </div>
-        ) : units.length === 0 ? (
+        ) : activeUnits.length === 0 ? (
           <div style={{ textAlign: 'center', padding: '60px', color: '#9ca3af', background: '#fff', borderRadius: '16px', border: '1px solid #e5e7eb' }}>
             <div style={{ fontSize: '48px', marginBottom: '12px' }}>🚪</div>
             <p>لا توجد وحدات — {canAddUnit ? 'أضف وحدة جديدة' : 'لا توجد وحدات في هذا العقار'}</p>
@@ -226,7 +239,7 @@ export default function UnitsPage() {
           </div>
         ) : (
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(120px, 1fr))', gap: '10px', marginBottom: '20px' }}>
-            {units.sort((a, b) => a.unitNumber.localeCompare(b.unitNumber, undefined, { numeric: true })).map(u => (
+            {activeUnits.sort((a, b) => a.unitNumber.localeCompare(b.unitNumber, undefined, { numeric: true })).map(u => (
               <div key={u.id} onClick={() => canAddUnit ? openEdit(u) : undefined}
                 style={{ background: TYPE_COLOR[u.type] || '#f3f4f6', borderRadius: '12px', padding: '14px 10px', textAlign: 'center', cursor: canAddUnit ? 'pointer' : 'default', border: '1px solid rgba(0,0,0,0.06)', transition: 'transform 0.15s' }}
                 onMouseOver={e => canAddUnit && (e.currentTarget.style.transform = 'translateY(-2px)')}
@@ -243,7 +256,7 @@ export default function UnitsPage() {
         )}
 
         {/* Units table */}
-        {units.length > 0 && (
+        {activeUnits.length > 0 && (
           <div style={{ background: '#fff', borderRadius: '14px', border: '1px solid #e5e7eb', overflow: 'hidden' }}>
             <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
               <thead>
@@ -254,8 +267,8 @@ export default function UnitsPage() {
                 </tr>
               </thead>
               <tbody>
-                {units.map((u, i) => (
-                  <tr key={u.id} style={{ borderBottom: i < units.length - 1 ? '1px solid #f3f4f6' : 'none' }}>
+                {activeUnits.map((u, i) => (
+                  <tr key={u.id} style={{ borderBottom: i < activeUnits.length - 1 ? '1px solid #f3f4f6' : 'none' }}>
                     <td style={{ padding: '10px 14px', fontWeight: '600', color: '#1B4F72' }}>{u.unitNumber}</td>
                     <td style={{ padding: '10px 14px' }}>
                       <span style={{ background: TYPE_COLOR[u.type], padding: '2px 8px', borderRadius: '10px', fontSize: '11px' }}>{TYPE_LABEL[u.type]}</span>
@@ -287,6 +300,48 @@ export default function UnitsPage() {
                 ))}
               </tbody>
             </table>
+          </div>
+        )}
+
+        {/* Deleted units (soft-delete) */}
+        {canDeleteUnit && deletedUnits.length > 0 && (
+          <div style={{ marginTop: '20px' }}>
+            <button onClick={() => setShowDeleted(s => !s)}
+              style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '8px 14px', background: '#fff', border: '1px solid #e5e7eb', borderRadius: '10px', cursor: 'pointer', fontSize: '13px', color: '#6b7280' }}>
+              🗑️ الوحدات المحذوفة ({deletedUnits.length}) {showDeleted ? '▲' : '▼'}
+            </button>
+            {showDeleted && (
+              <div style={{ background: '#fff', borderRadius: '14px', border: '1px solid #e5e7eb', overflow: 'hidden', marginTop: '10px' }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
+                  <thead>
+                    <tr style={{ background: '#f9fafb' }}>
+                      {['رقم الوحدة', 'النوع', 'تاريخ الحذف', 'إجراءات'].map(h => (
+                        <th key={h} style={{ padding: '10px 14px', textAlign: 'right', color: '#6b7280', fontWeight: '500', borderBottom: '1px solid #e5e7eb' }}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {deletedUnits.map((u, i) => (
+                      <tr key={u.id} style={{ borderBottom: i < deletedUnits.length - 1 ? '1px solid #f3f4f6' : 'none' }}>
+                        <td style={{ padding: '10px 14px', fontWeight: '600', color: '#9ca3af' }}>{u.unitNumber}</td>
+                        <td style={{ padding: '10px 14px' }}>
+                          <span style={{ background: '#f3f4f6', padding: '2px 8px', borderRadius: '10px', fontSize: '11px', color: '#6b7280' }}>{TYPE_LABEL[u.type]}</span>
+                        </td>
+                        <td style={{ padding: '10px 14px', color: '#6b7280' }}>
+                          {u.deletedAt?.toDate ? u.deletedAt.toDate().toLocaleDateString('ar-SA') : '—'}
+                        </td>
+                        <td style={{ padding: '10px 14px' }}>
+                          <button onClick={() => restoreUnit(u.id)}
+                            style={{ padding: '4px 10px', border: '1px solid #86efac', borderRadius: '6px', background: '#fff', cursor: 'pointer', fontSize: '12px', color: '#16a34a' }}>
+                            ↩️ استعادة
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
           </div>
         )}
       </div>
