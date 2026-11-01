@@ -160,15 +160,13 @@ export default function ReportsPage() {
   }), [filteredReports]);
 
   // الوحدات المحذوفة (حذف ناعم) تبقى في قاعدة البيانات حتى لا تنكسر بيانات
-  // الأشهر السابقة لها، لكن لا نريدها تظهر إلى الأبد كـ"شاغرة" في تقارير بعد
-  // تاريخ حذفها. نستبعدها فقط عندما تكون الفترة المختارة بأكملها بعد الحذف؛
-  // أي فترة (أو جزء منها) تسبق الحذف تبقى تعرضها حتى تبقى تلك الأشهر صحيحة
-  const relevantUnits = useMemo(() => units.filter((u:any) => {
-    if (!u.deleted) return true;
-    const deletedAt = u.deletedAt?.toDate ? u.deletedAt.toDate() : (u.deletedAt ? new Date(u.deletedAt) : null);
-    if (!deletedAt) return false;
-    return dateRange.start < deletedAt;
-  }), [units, dateRange]);
+  // الأشهر السابقة لها. قاعدة بسيطة: إذا كانت الفترة المعروضة تمتد للحاضر أو
+  // المستقبل (كالعرض الافتراضي "السنة كاملة")، نخفي الوحدة المحذوفة فوراً —
+  // هذا يغطي كل الحالات الشائعة بدون تعقيد إضافي. لا تظهر إلا لو كنت تستعرض
+  // فترة ماضية منتهية بالكامل (مثلاً سنة سابقة، أو شهر محدد مضى)
+  const relevantUnits = useMemo(() => units.filter((u:any) =>
+    !u.deleted || dateRange.end < new Date()
+  ), [units, dateRange]);
 
   // ─── ✅ Rent Table — الإصلاح الكامل لمشكلة تعدد المستأجرين ────────────────
   const rentTable = useMemo((): TenantRow[] => {
