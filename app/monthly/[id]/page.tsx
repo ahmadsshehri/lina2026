@@ -103,6 +103,15 @@ export default function TenantDetailPage() {
         contractEnd: form.contractEnd ? Timestamp.fromDate(new Date(form.contractEnd)) : null,
         paymentCycle: form.paymentCycle, status: form.status, notes: form.notes,
       });
+      // نزامن حالة الوحدة (مشغولة/شاغرة) مع حالة العقد، حتى لا تبقى الوحدة
+      // "مشغولة" في قاعدة البيانات بعد إنهاء آخر مستأجر فيها من هذي الصفحة
+      if (tenant.unitId && form.status !== tenant.status) {
+        if (form.status !== 'active' && tenant.status === 'active') {
+          await updateDoc(doc(db,'units',tenant.unitId), { status:'vacant' });
+        } else if (form.status === 'active') {
+          await updateDoc(doc(db,'units',tenant.unitId), { status:'occupied' });
+        }
+      }
       await loadTenant();
       setEditMode(false);
     } catch (e) { alert('حدث خطأ'); }

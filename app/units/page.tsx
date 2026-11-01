@@ -1,7 +1,7 @@
 'use client';
 import { useEffect, useState } from 'react';
 import { db } from '../../lib/firebase';
-import { collection, getDocs, addDoc, updateDoc, setDoc, doc, query, where, serverTimestamp, Timestamp } from 'firebase/firestore';
+import { collection, getDocs, addDoc, updateDoc, setDoc, doc, query, where, serverTimestamp, Timestamp, writeBatch } from 'firebase/firestore';
 import { useRouter } from 'next/navigation';
 import { useAuth } from '../../context/AuthContext';
 
@@ -96,6 +96,12 @@ export default function UnitsPage() {
       };
       if (editUnit) {
         await updateDoc(doc(db, 'units', editUnit.id), data);
+        // رقم/اسم الوحدة محفوظ كنسخة مكرّرة (unitNumber) داخل كل مستأجر ودفعة
+        // مرتبطين بها لأغراض العرض — نزامنها هنا حتى لا تبقى قائمة المستأجرين
+        // والدفعات تعرض الاسم القديم بعد إعادة التسمية
+        if (editUnit.unitNumber !== form.unitNumber) {
+          await syncUnitNumber(editUnit.id, form.unitNumber);
+        }
       } else {
         await addDoc(collection(db, 'units'), { ...data, createdAt: serverTimestamp() });
       }
@@ -105,6 +111,32 @@ export default function UnitsPage() {
       alert('حدث خطأ: ' + e.message);
     }
     setSaving(false);
+  };
+
+  // unitNumber محفوظ كنسخة مكرّرة داخل مستندات tenants و rentPayments لأغراض
+  // العرض السريع بدون جوين — نزامنها يدوياً عند إعادة تسمية الوحدة. تحديث
+  // rentPayments يتطلب صلاحية المالك (حسب قواعد الأمان)، فنتجاهله بصمت للمدير
+  // بدل ما نفشل العملية كلها أو نوقف تحديث المستأجرين الناجح أصلاً
+  const syncUnitNumber = async (unitId: string, newUnitNumber: string) => {
+    try {
+      const tSnap = await getDocs(query(collection(db, 'tenants'), where('unitId', '==', unitId)));
+      if (tSnap.docs.length) {
+        const batch = writeBatch(db);
+        tSnap.docs.forEach(d => batch.update(d.ref, { unitNumber: newUnitNumber }));
+        await batch.commit();
+      }
+    } catch { /* نتجاهل: اسم الوحدة نفسه تحدّث على كل حال */ }
+
+    if (canDeleteUnit) {
+      try {
+        const pSnap = await getDocs(query(collection(db, 'rentPayments'), where('unitId', '==', unitId)));
+        if (pSnap.docs.length) {
+          const batch = writeBatch(db);
+          pSnap.docs.forEach(d => batch.update(d.ref, { unitNumber: newUnitNumber }));
+          await batch.commit();
+        }
+      } catch { /* نتجاهل */ }
+    }
   };
 
   const requestDelete = (u: Unit) => {
