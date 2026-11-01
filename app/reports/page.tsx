@@ -39,6 +39,19 @@ interface TenantRow {
 function fmt(n: number)    { return n.toLocaleString('ar-SA'); }
 function fmtPct(n: number) { return Math.round(n)+'%'; }
 function daysInMonth(y: number, m: number) { return new Date(y, m, 0).getDate(); }
+// الإيجار الساري في تاريخ مُعيّن — آخر قيمة في rentHistory سرى تاريخها قبل أو
+// عند هذا التاريخ، أو الإيجار الحالي إن ما فيه سجل تغييرات بعد
+function rentForDate(tenant: any, date: Date): number {
+  if (!tenant?.rentHistory || tenant.rentHistory.length === 0) return tenant?.rentAmount || 0;
+  const toD = (ts: any) => ts?.toDate ? ts.toDate() : (ts ? new Date(ts) : null);
+  const sorted = [...tenant.rentHistory].sort((a:any,b:any) => (toD(a.effectiveFrom)?.getTime()||0) - (toD(b.effectiveFrom)?.getTime()||0));
+  let applicable = sorted[0].amount;
+  for (const entry of sorted) {
+    const d = toD(entry.effectiveFrom);
+    if (d && d <= date) applicable = entry.amount; else break;
+  }
+  return applicable;
+}
 
 // ─── Component ────────────────────────────────────────────────────────────────
 export default function ReportsPage() {
@@ -209,7 +222,7 @@ export default function ReportsPage() {
             });
             due = monthPaysForTenant.length > 0
               ? Math.max(...monthPaysForTenant.map((p:any) => p.amountDue || 0))
-              : (tenantInMonth.rentAmount || 0);
+              : rentForDate(tenantInMonth, ms);
           }
 
           monthDue[m] = due;

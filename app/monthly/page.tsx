@@ -15,11 +15,13 @@ interface Unit {
   id: string; unitNumber: string; type: string;
   status: string; basePrice: number; deleted?: boolean;
 }
+interface RentChange { amount: number; effectiveFrom: any; }
 interface Tenant {
   id: string; propertyId: string; unitId: string; unitNumber: string;
   name: string; phone: string; idNumber: string; contractNumber: string;
   contractStart: any; contractEnd: any; paymentCycle: string;
   rentAmount: number; status: string; notes?: string; renewedAt?: any;
+  rentHistory?: RentChange[];
 }
 interface Payment {
   id: string; tenantId: string; unitNumber: string; tenantName: string;
@@ -57,6 +59,18 @@ function toInputDate(ts: any): string {
   if (!d) return '';
   return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
 }
+// الإيجار الساري في تاريخ مُعيّن — آخر قيمة في rentHistory سرى تاريخها قبل أو
+// عند هذا التاريخ، أو الإيجار الحالي إن ما فيه سجل تغييرات بعد
+function rentForDate(tenant: Tenant, date: Date): number {
+  if (!tenant.rentHistory || tenant.rentHistory.length === 0) return tenant.rentAmount || 0;
+  const sorted = [...tenant.rentHistory].sort((a,b) => (toDate(a.effectiveFrom)?.getTime()||0) - (toDate(b.effectiveFrom)?.getTime()||0));
+  let applicable = sorted[0].amount;
+  for (const entry of sorted) {
+    const d = toDate(entry.effectiveFrom);
+    if (d && d <= date) applicable = entry.amount; else break;
+  }
+  return applicable;
+}
 
 function buildPaymentSchedule(tenant: Tenant, payments: Payment[]) {
   const start = toDate(tenant.contractStart);
@@ -93,7 +107,7 @@ function buildPaymentSchedule(tenant: Tenant, payments: Payment[]) {
     // بدل الإيجار الأساسي، حتى لا تُحتسب فروقات الخصم كمتأخرات
     const due = periodPays.length > 0
       ? Math.max(...periodPays.map(p => p.amountDue || 0))
-      : tenant.rentAmount * step;
+      : rentForDate(tenant, periodStart) * step;
 
     const paid    = periodPays.reduce((s,p) => s+(p.amountPaid||0), 0);
     const balance = Math.max(0, due - paid);
@@ -793,9 +807,16 @@ export default function MonthlyPage() {
                   ))}
                 </select>
               </div>
-              {[['name','اسم المستأجر','text'],['phone','رقم الجوال','tel'],['idNumber','رقم الهوية','text'],['contractNumber','رقم العقد','text'],['rentAmount','مبلغ الإيجار (ر.س)','number']].map(([k,l,t])=>(
-                <div key={k}><label style={lbl}>{l}</label><input type={t} value={(tf as any)[k]} onChange={e=>setTf(f=>({...f,[k]:e.target.value}))} style={inp}/></div>
-              ))}
+              {[['name','اسم المستأجر','text'],['phone','رقم الجوال','tel'],['idNumber','رقم الهوية','text'],['contractNumber','رقم العقد','text'],['rentAmount','مبلغ الإيجار (ر.س)','number']].map(([k,l,t])=>{
+                const rentLocked = k==='rentAmount' && !!editTenant && !!editTenant.rentHistory?.length;
+                return (
+                  <div key={k}>
+                    <label style={lbl}>{l}</label>
+                    <input type={t} value={(tf as any)[k]} onChange={e=>setTf(f=>({...f,[k]:e.target.value}))} style={inp} disabled={rentLocked}/>
+                    {rentLocked && <div style={{ fontSize:'11px', color:'#9ca3af', marginTop:'4px' }}>لتغيير الإيجار افتح صفحة المستأجر واستخدم "📈 تعديل الإيجار"</div>}
+                  </div>
+                );
+              })}
               <div><label style={lbl}>بداية العقد</label><input type="date" value={tf.contractStart} onChange={e=>handleContractStartChange(e.target.value)} style={inp}/></div>
               <div><label style={lbl}>نهاية العقد <span style={{ fontSize:'10px', color:'#9ca3af' }}>(تلقائي بعد سنة)</span></label><input type="date" value={tf.contractEnd} onChange={e=>setTf(f=>({...f,contractEnd:e.target.value}))} style={inp}/></div>
               <div><label style={lbl}>دورة الدفع</label><select value={tf.paymentCycle} onChange={e=>setTf(f=>({...f,paymentCycle:e.target.value}))} style={inp}><option value="monthly">شهري</option><option value="quarterly">ربع سنوي</option><option value="semi">نصف سنوي</option><option value="annual">سنوي</option></select></div>

@@ -9,11 +9,13 @@ import {
 import { AppUserBasic } from '../../../lib/userHelpers';
 import { useAuth } from '../../../context/AuthContext';
 
+interface RentChange { amount: number; effectiveFrom: any; }
 interface Tenant {
   id: string; propertyId: string; unitId: string; unitNumber: string;
   name: string; phone: string; idNumber: string; contractNumber: string;
   contractStart: any; contractEnd: any; paymentCycle: string;
   rentAmount: number; status: string; notes?: string;
+  rentHistory?: RentChange[];
 }
 interface Payment {
   id: string; amountDue: number; amountPaid: number; balance: number;
@@ -37,6 +39,22 @@ function toInputDate(ts: any) {
 function monthLabel(d: Date) {
   return d.toLocaleDateString('ar-SA', { month:'long', year:'numeric' });
 }
+// الإيجار الساري في تاريخ مُعيّن — يرجع آخر قيمة في rentHistory سرى تاريخها
+// قبل أو عند هذا التاريخ، أو الإيجار الحالي إن ما فيه سجل تغييرات بعد
+function rentForDate(tenant: Tenant, date: Date): number {
+  if (!tenant.rentHistory || tenant.rentHistory.length === 0) return tenant.rentAmount || 0;
+  const sorted = [...tenant.rentHistory].sort((a,b) => {
+    const da = a.effectiveFrom?.toDate ? a.effectiveFrom.toDate() : new Date(a.effectiveFrom);
+    const db_ = b.effectiveFrom?.toDate ? b.effectiveFrom.toDate() : new Date(b.effectiveFrom);
+    return da.getTime() - db_.getTime();
+  });
+  let applicable = sorted[0].amount;
+  for (const entry of sorted) {
+    const d = entry.effectiveFrom?.toDate ? entry.effectiveFrom.toDate() : new Date(entry.effectiveFrom);
+    if (d <= date) applicable = entry.amount; else break;
+  }
+  return applicable;
+}
 
 export default function TenantDetailPage() {
   const params = useParams();
@@ -54,6 +72,8 @@ export default function TenantDetailPage() {
   const [showPayModal, setShowPayModal] = useState(false);
   const [editPayment, setEditPayment] = useState<Payment | null>(null);
   const [deletePayConfirm, setDeletePayConfirm] = useState<Payment | null>(null);
+  const [showRentChange, setShowRentChange] = useState(false);
+  const [rentChangeForm, setRentChangeForm] = useState({ amount:'', effectiveFrom:'' });
 
   const [form, setForm] = useState({
     name:'', phone:'', idNumber:'', contractNumber:'',
@@ -114,6 +134,28 @@ export default function TenantDetailPage() {
       }
       await loadTenant();
       setEditMode(false);
+    } catch (e) { alert('حدث خطأ'); }
+    setSaving(false);
+  };
+
+  // ─── تغيير الإيجار بتاريخ سريان ──────────────────────────────
+  // نسجّل كل تغيير بتاريخه بدل الكتابة فوق rentAmount مباشرة، حتى لا يُطبَّق
+  // المبلغ الجديد رجعياً على الأشهر السابقة التي ما لها دفعة مسجلة بعد
+  const changeRent = async () => {
+    if (!tenant || !canEdit) return;
+    const newAmount = Number(rentChangeForm.amount);
+    if (!newAmount || newAmount <= 0 || !rentChangeForm.effectiveFrom) return;
+    setSaving(true);
+    try {
+      const effFrom = Timestamp.fromDate(new Date(rentChangeForm.effectiveFrom));
+      const baseHistory: RentChange[] = (tenant.rentHistory && tenant.rentHistory.length > 0)
+        ? tenant.rentHistory
+        : [{ amount: tenant.rentAmount || 0, effectiveFrom: tenant.contractStart || Timestamp.now() }];
+      const rentHistory = [...baseHistory, { amount: newAmount, effectiveFrom: effFrom }];
+      await updateDoc(doc(db,'tenants',tenant.id), { rentAmount: newAmount, rentHistory });
+      await loadTenant();
+      setShowRentChange(false);
+      setRentChangeForm({ amount:'', effectiveFrom:'' });
     } catch (e) { alert('حدث خطأ'); }
     setSaving(false);
   };
@@ -194,7 +236,7 @@ export default function TenantDetailPage() {
       // بدل الإيجار الأساسي، حتى لا تُحتسب فروقات الخصم كمتأخرات
       const due = periodPaid.length > 0
         ? Math.max(...periodPaid.map(p => p.amountDue || 0))
-        : tenant.rentAmount * step;
+        : rentForDate(tenant, periodStart) * step;
       const balance = Math.max(0, due - totalPaid);
       const isPastDue = new Date() > periodEnd;
 
@@ -280,13 +322,19 @@ export default function TenantDetailPage() {
         {/* ══ TAB: الملف الشخصي ══ */}
         {activeTab==='profile'&&(
           <div style={{background:'#fff',borderRadius:'16px',border:'1px solid #e5e7eb',overflow:'hidden'}}>
-            <div style={{padding:'16px',borderBottom:'1px solid #f3f4f6',display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+            <div style={{padding:'16px',borderBottom:'1px solid #f3f4f6',display:'flex',justifyContent:'space-between',alignItems:'center',gap:'8px'}}>
               <span style={{fontSize:'14px',fontWeight:'600',color:'#374151'}}>بيانات المستأجر</span>
               {canEdit&&(
-                <button onClick={()=>setEditMode(!editMode)}
-                  style={{padding:'7px 16px',background:editMode?'#f3f4f6':'#1B4F72',color:editMode?'#374151':'#fff',border:'none',borderRadius:'8px',cursor:'pointer',fontSize:'13px'}}>
-                  {editMode?'إلغاء':'✏️ تعديل'}
-                </button>
+                <div style={{display:'flex',gap:'8px'}}>
+                  <button onClick={()=>{setRentChangeForm({amount:String(tenant.rentAmount||''),effectiveFrom:''});setShowRentChange(true);}}
+                    style={{padding:'7px 16px',background:'#fff',color:'#1B4F72',border:'1px solid #1B4F72',borderRadius:'8px',cursor:'pointer',fontSize:'13px',whiteSpace:'nowrap'}}>
+                    📈 تعديل الإيجار
+                  </button>
+                  <button onClick={()=>setEditMode(!editMode)}
+                    style={{padding:'7px 16px',background:editMode?'#f3f4f6':'#1B4F72',color:editMode?'#374151':'#fff',border:'none',borderRadius:'8px',cursor:'pointer',fontSize:'13px'}}>
+                    {editMode?'إلغاء':'✏️ تعديل'}
+                  </button>
+                </div>
               )}
             </div>
             <div style={{padding:'16px'}}>
@@ -305,7 +353,10 @@ export default function TenantDetailPage() {
                     <div key={k}>
                       <label style={lbl}>{l}</label>
                       <input type={t} value={(form as any)[k]} onChange={e=>setForm(f=>({...f,[k]:e.target.value}))} style={inp}
-                        disabled={k==='unitNumber'}/>
+                        disabled={k==='unitNumber'||k==='rentAmount'}/>
+                      {k==='rentAmount' && (
+                        <div style={{fontSize:'11px',color:'#9ca3af',marginTop:'4px'}}>لتغيير الإيجار استخدم زر "📈 تعديل الإيجار" بالأسفل — يحفظ تاريخ السريان ولا يؤثر على الأشهر السابقة</div>
+                      )}
                     </div>
                   ))}
                   <div>
@@ -361,6 +412,21 @@ export default function TenantDetailPage() {
                     <div style={{gridColumn:'1 / -1',padding:'12px 14px',borderBottom:'1px solid #f3f4f6'}}>
                       <div style={{fontSize:'11px',color:'#9ca3af',marginBottom:'3px'}}>📝 ملاحظات</div>
                       <div style={{fontSize:'13px',color:'#374151'}}>{tenant.notes}</div>
+                    </div>
+                  )}
+                  {tenant.rentHistory && tenant.rentHistory.length>0 && (
+                    <div style={{gridColumn:'1 / -1',padding:'12px 14px'}}>
+                      <div style={{fontSize:'11px',color:'#9ca3af',marginBottom:'8px'}}>📈 سجل تغييرات الإيجار</div>
+                      {[...tenant.rentHistory].sort((a,b)=>{
+                        const da=a.effectiveFrom?.toDate?a.effectiveFrom.toDate():new Date(a.effectiveFrom);
+                        const db2=b.effectiveFrom?.toDate?b.effectiveFrom.toDate():new Date(b.effectiveFrom);
+                        return db2.getTime()-da.getTime();
+                      }).map((r,i)=>(
+                        <div key={i} style={{display:'flex',justifyContent:'space-between',padding:'6px 0',borderBottom:i<tenant.rentHistory!.length-1?'1px solid #f3f4f6':'none',fontSize:'13px'}}>
+                          <span style={{color:'#6b7280'}}>من {fmtDate(r.effectiveFrom)}</span>
+                          <span style={{fontWeight:'600',color:'#111827'}}>{r.amount.toLocaleString('ar-SA')} ر.س</span>
+                        </div>
+                      ))}
                     </div>
                   )}
                 </div>
@@ -603,6 +669,40 @@ export default function TenantDetailPage() {
                 {saving?'جارٍ الحذف...':'تأكيد الحذف'}
               </button>
               <button onClick={()=>setDeletePayConfirm(null)} style={{padding:'12px 20px',background:'#f3f4f6',color:'#374151',border:'none',borderRadius:'10px',cursor:'pointer'}}>إلغاء</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal تعديل الإيجار */}
+      {showRentChange&&tenant&&(
+        <div style={{position:'fixed',inset:'0',background:'rgba(0,0,0,0.6)',display:'flex',alignItems:'center',justifyContent:'center',zIndex:1000}}
+          onClick={()=>setShowRentChange(false)}>
+          <div style={{background:'#fff',borderRadius:'16px',padding:'24px',width:'400px',maxWidth:'95vw'}}
+            onClick={e=>e.stopPropagation()}>
+            <div style={{display:'flex',justifyContent:'space-between',marginBottom:'16px'}}>
+              <h2 style={{margin:0,fontSize:'16px',color:'#1B4F72'}}>📈 تعديل الإيجار</h2>
+              <button onClick={()=>setShowRentChange(false)} style={{border:'none',background:'none',fontSize:'20px',cursor:'pointer',color:'#6b7280'}}>✕</button>
+            </div>
+            <p style={{fontSize:'12px',color:'#6b7280',margin:'0 0 16px'}}>
+              الإيجار الحالي <strong>{tenant.rentAmount.toLocaleString('ar-SA')} ر.س</strong>. حدّد المبلغ الجديد وتاريخ سريانه — الأشهر من هذا التاريخ فما بعد تُحسب بالمبلغ الجديد، والأشهر السابقة (سواء كان عليها دفعة مسجلة أو لا) تبقى كما هي.
+            </p>
+            <div style={{display:'flex',flexDirection:'column',gap:'12px'}}>
+              <div>
+                <label style={lbl}>المبلغ الجديد (ر.س)</label>
+                <input type="number" value={rentChangeForm.amount} onChange={e=>setRentChangeForm(f=>({...f,amount:e.target.value}))} style={inp}/>
+              </div>
+              <div>
+                <label style={lbl}>تاريخ السريان</label>
+                <input type="date" value={rentChangeForm.effectiveFrom} onChange={e=>setRentChangeForm(f=>({...f,effectiveFrom:e.target.value}))} style={inp}/>
+              </div>
+            </div>
+            <div style={{display:'flex',gap:'10px',marginTop:'20px'}}>
+              <button onClick={changeRent} disabled={saving||!rentChangeForm.amount||!rentChangeForm.effectiveFrom}
+                style={{flex:1,padding:'12px',background:saving?'#9ca3af':'#1B4F72',color:'#fff',border:'none',borderRadius:'10px',cursor:'pointer',fontSize:'14px',fontWeight:'600'}}>
+                {saving?'جارٍ الحفظ...':'💾 حفظ'}
+              </button>
+              <button onClick={()=>setShowRentChange(false)} style={{padding:'12px 20px',background:'#f3f4f6',color:'#374151',border:'none',borderRadius:'10px',cursor:'pointer'}}>إلغاء</button>
             </div>
           </div>
         </div>
