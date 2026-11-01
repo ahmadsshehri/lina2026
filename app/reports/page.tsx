@@ -159,9 +159,20 @@ export default function ReportsPage() {
     profit:   filteredReports.reduce((s,r)=>s+r.netProfit,0),
   }), [filteredReports]);
 
+  // الوحدات المحذوفة (حذف ناعم) تبقى في قاعدة البيانات حتى لا تنكسر بيانات
+  // الأشهر السابقة لها، لكن لا نريدها تظهر إلى الأبد كـ"شاغرة" في تقارير بعد
+  // تاريخ حذفها. نستبعدها فقط عندما تكون الفترة المختارة بأكملها بعد الحذف؛
+  // أي فترة (أو جزء منها) تسبق الحذف تبقى تعرضها حتى تبقى تلك الأشهر صحيحة
+  const relevantUnits = useMemo(() => units.filter((u:any) => {
+    if (!u.deleted) return true;
+    const deletedAt = u.deletedAt?.toDate ? u.deletedAt.toDate() : (u.deletedAt ? new Date(u.deletedAt) : null);
+    if (!deletedAt) return false;
+    return dateRange.start < deletedAt;
+  }), [units, dateRange]);
+
   // ─── ✅ Rent Table — الإصلاح الكامل لمشكلة تعدد المستأجرين ────────────────
   const rentTable = useMemo((): TenantRow[] => {
-    return units
+    return relevantUnits
       .filter(u => u.type === 'monthly' || u.type === 'owner')
       .sort((a, b) => a.unitNumber?.localeCompare(b.unitNumber, undefined, { numeric: true }))
       .map(u => {
@@ -276,10 +287,10 @@ export default function ReportsPage() {
           hasMultiple:   tenantsInPeriod.length > 1,
         };
       });
-  }, [units, tenants, payments, y, months, dateRange]);
+  }, [relevantUnits, tenants, payments, y, months, dateRange]);
 
   // ─── Units report ──────────────────────────────────────────────────────────
-  const unitReport = useMemo(() => units.map(u => {
+  const unitReport = useMemo(() => relevantUnits.map(u => {
     // ✅ نجمع دفعات كل المستأجرين لهذه الشقة في الفترة
     const unitTenants  = tenants.filter(t => t.unitId === u.id);
     const uPays        = filteredPayments.filter(p => unitTenants.some(t => t.id === p.tenantId));
@@ -294,7 +305,7 @@ export default function ReportsPage() {
       else { statusLabel='لا دفعات'; statusColor='#6b7280'; statusBg='#f3f4f6'; }
     } else if (u.status==='maintenance') { statusLabel='صيانة'; statusColor='#6b7280'; statusBg='#f3f4f6'; }
     return { ...u, tenant:activeTenant, totalPaid, totalBalance, lastPay, statusLabel, statusColor, statusBg };
-  }), [units, tenants, filteredPayments]);
+  }), [relevantUnits, tenants, filteredPayments]);
 
   const unitSummary = useMemo(() => ({
     paid:        unitReport.filter(u=>u.statusLabel==='مسددة').length,
@@ -306,7 +317,7 @@ export default function ReportsPage() {
   }), [unitReport]);
 
   // ─── Furnished report ──────────────────────────────────────────────────────
-  const furnishedUnits = useMemo(() => units.filter(u=>u.type==='furnished'), [units]);
+  const furnishedUnits = useMemo(() => relevantUnits.filter(u=>u.type==='furnished'), [relevantUnits]);
 
   const furnishedReport = useMemo(() => furnishedUnits.map(u => {
     const uBook = filteredBookings.filter(b=>b.unitId===u.id);
